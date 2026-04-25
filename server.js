@@ -38,6 +38,9 @@ app.post("/create-order", async (req, res) => {
   try {
     const { turfId, slots, dateString } = req.body;
 
+    const advanceAmount = turf.bookingPrice || total;
+     amount: advanceAmount * 100
+
     // ✅ Validate input
     if (!Array.isArray(slots) || slots.length === 0) {
       return res.status(400).json({ error: "Invalid slots" });
@@ -238,5 +241,5 @@ app.post("/verify-payment", async (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log("Server running on port - server.js:241" + PORT);
+  console.log("Server running on port - server.js:244" + PORT);
 });
