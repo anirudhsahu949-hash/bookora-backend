@@ -38,10 +38,6 @@ app.post("/create-order", async (req, res) => {
   try {
     const { turfId, slots, dateString } = req.body;
 
-    const advanceAmount = turf.bookingPrice || total;
-     amount: advanceAmount * 100
-
-    // ✅ Validate input
     if (!Array.isArray(slots) || slots.length === 0) {
       return res.status(400).json({ error: "Invalid slots" });
     }
@@ -67,7 +63,7 @@ app.post("/create-order", async (req, res) => {
 
     const specialPrices = specialSnap.docs.map((d) => d.data());
 
-    // 🔥 Check already booked slots
+    // 🔥 Check booked slots
     const bookingSnap = await db
       .collection("bookings")
       .where("turfId", "==", turfId)
@@ -84,7 +80,7 @@ app.post("/create-order", async (req, res) => {
       }
     }
 
-    // 💰 Calculate price (SERVER SIDE)
+    // 💰 Calculate TOTAL price
     let total = 0;
 
     for (const slot of slots) {
@@ -109,9 +105,15 @@ app.post("/create-order", async (req, res) => {
       return res.status(400).json({ error: "Invalid price" });
     }
 
+    // ✅ ADVANCE PAYMENT LOGIC (FIXED)
+    const advanceAmount =
+      Number(turf.bookingPrice) > 0
+        ? Number(turf.bookingPrice)
+        : total;
+
     // 🔥 Create Razorpay Order
     const order = await razorpay.orders.create({
-      amount: total * 100,
+      amount: advanceAmount * 100,
       currency: "INR",
       receipt: "receipt_" + Date.now(),
     });
@@ -121,7 +123,8 @@ app.post("/create-order", async (req, res) => {
       turfId,
       slots,
       dateString,
-      amount: total,
+      totalAmount: total,
+      advanceAmount: advanceAmount,
       status: "pending",
       createdAt: new Date(),
     });
@@ -200,7 +203,7 @@ app.post("/verify-payment", async (req, res) => {
       return res.status(400).json({ success: false });
     }
 
-    if (payment.amount !== orderData.amount * 100) {
+    if (payment.amount !== orderData.advanceAmount * 100) {
       return res.status(400).json({ success: false });
     }
 
@@ -241,5 +244,5 @@ app.post("/verify-payment", async (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log("Server running on port - server.js:244" + PORT);
+  console.log("Server running on port - server.js:247" + PORT);
 });
