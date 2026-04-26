@@ -267,7 +267,7 @@ app.get("/pay/:orderId", async (req, res) => {
             order_id: "${orderId}",
             handler: function (response) {
 
-              fetch("/verify-payment", {
+              fetch("https://bookora-backend-95u4.onrender.com/verify-payment", {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json"
@@ -281,8 +281,7 @@ app.get("/pay/:orderId", async (req, res) => {
               .then(res => res.json())
               .then(data => {
                 if (data.success) {
-                  document.body.innerHTML = "<h2>✅ Payment Successful 🎉</h2>
-                  <p>You can now go back to the app.</p>";
+                  document.body.innerHTML = "<h2>✅ Payment Successful 🎉</h2>";
                 } else {
                   document.body.innerHTML = "<h2>❌ Payment Verification Failed</h2>";
                 }
@@ -308,5 +307,5 @@ app.get("/pay/:orderId", async (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log("Server running on port - server.js:311" + PORT);
+  console.log("Server running on port - server.js:310" + PORT);
 });
