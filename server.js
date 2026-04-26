@@ -28,8 +28,11 @@ const razorpay = new Razorpay({
 });
 
 // ✅ Health Check
-app.get("/", (req, res) => {
-  res.send("Backend is running 🚀");
+app.get("/success", async (req, res) => {
+  const { payment_id, order_id, signature } = req.query;
+
+  // Call your verify-payment logic here OR redirect to frontend
+  res.send("Payment successful 🎉 You can close this page.");
 });
 
 
@@ -239,6 +242,65 @@ app.post("/verify-payment", async (req, res) => {
   }
 });
 
+app.get("/pay/:orderId", async (req, res) => {
+  const { orderId } = req.params;
+
+  const orderDoc = await db.collection("orders").doc(orderId).get();
+  if (!orderDoc.exists) {
+    return res.send("Invalid order");
+  }
+
+  const orderData = orderDoc.data();
+
+  res.send(`
+    <html>
+      <head>
+        <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+      </head>
+      <body>
+        <script>
+          var options = {
+            key: "${process.env.KEY_ID}",
+            amount: "${orderData.advanceAmount * 100}",
+            currency: "INR",
+            name: "Bookora",
+            order_id: "${orderId}",
+            handler: function (response) {
+
+              fetch("/verify-payment", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                  order_id: response.razorpay_order_id,
+                  payment_id: response.razorpay_payment_id,
+                  signature: response.razorpay_signature
+                })
+              })
+              .then(res => res.json())
+              .then(data => {
+                if (data.success) {
+                  document.body.innerHTML = "<h2>✅ Payment Successful 🎉</h2>
+                  <p>You can now go back to the app.</p>";
+                } else {
+                  document.body.innerHTML = "<h2>❌ Payment Verification Failed</h2>";
+                }
+              });
+
+            },
+            theme: { color: "#111111" }
+          };
+
+          var rzp = new Razorpay(options);
+          rzp.open();
+        </script>
+      </body>
+    </html>
+  `);
+});
+
+
 
 // =======================================================
 // 🚀 START SERVER
@@ -246,5 +308,5 @@ app.post("/verify-payment", async (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log("Server running on port - server.js:249" + PORT);
+  console.log("Server running on port - server.js:311" + PORT);
 });
