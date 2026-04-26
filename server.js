@@ -1,12 +1,10 @@
-
-
 const express = require("express");
 const Razorpay = require("razorpay");
 const cors = require("cors");
 const crypto = require("crypto");
 const admin = require("firebase-admin");
 
-// 🔥 Firebase Admin Init (ONLY ONCE)
+// 🔥 Firebase Admin Init
 admin.initializeApp({
   credential: admin.credential.cert({
     projectId: process.env.FIREBASE_PROJECT_ID,
@@ -18,26 +16,18 @@ admin.initializeApp({
 const db = admin.firestore();
 
 const app = express();
-app.use(express.json());  
-app.use(cors()); // allow all for now
+app.use(express.json());
+app.use(cors());
 
-// 🔐 Razorpay
+// 🔐 Razorpay instance
 const razorpay = new Razorpay({
   key_id: process.env.KEY_ID,
   key_secret: process.env.KEY_SECRET,
 });
 
-// ✅ Health Check
-app.get("/success", async (req, res) => {
-  const { payment_id, order_id, signature } = req.query;
-
-  // Call your verify-payment logic here OR redirect to frontend
-  res.send("Payment successful 🎉 You can close this page.");
-});
-
 
 // =======================================================
-// ✅ 1. CREATE ORDER (SECURE)
+// ✅ 1. CREATE ORDER
 // =======================================================
 app.post("/create-order", async (req, res) => {
   try {
@@ -51,7 +41,6 @@ app.post("/create-order", async (req, res) => {
       return res.status(400).json({ error: "Invalid request" });
     }
 
-    // 🔥 Fetch turf
     const turfDoc = await db.collection("turfs").doc(turfId).get();
     if (!turfDoc.exists) {
       return res.status(404).json({ error: "Turf not found" });
@@ -59,7 +48,7 @@ app.post("/create-order", async (req, res) => {
 
     const turf = turfDoc.data();
 
-    // 🔥 Fetch special prices
+    // 🔥 Special prices
     const specialSnap = await db
       .collection("specialPrices")
       .where("turfId", "==", turfId)
@@ -68,7 +57,7 @@ app.post("/create-order", async (req, res) => {
 
     const specialPrices = specialSnap.docs.map((d) => d.data());
 
-    // 🔥 Check booked slots
+    // 🔥 Already booked slots
     const bookingSnap = await db
       .collection("bookings")
       .where("turfId", "==", turfId)
@@ -85,7 +74,7 @@ app.post("/create-order", async (req, res) => {
       }
     }
 
-    // 💰 Calculate TOTAL price
+    // 💰 Calculate price
     let total = 0;
 
     for (const slot of slots) {
@@ -110,31 +99,36 @@ app.post("/create-order", async (req, res) => {
       return res.status(400).json({ error: "Invalid price" });
     }
 
-    // ✅ ADVANCE PAYMENT LOGIC (FIXED)
     const advanceAmount =
       Number(turf.bookingPrice) > 0
         ? Number(turf.bookingPrice)
         : total;
 
-    // 🔥 Create Razorpay Order
+    // 🔥 Create Razorpay order
     const order = await razorpay.orders.create({
       amount: advanceAmount * 100,
       currency: "INR",
       receipt: "receipt_" + Date.now(),
     });
 
-    // 🔥 Save order
+    // 🔥 Save order in DB
     await db.collection("orders").doc(order.id).set({
       turfId,
       slots,
       dateString,
       totalAmount: total,
-      advanceAmount: advanceAmount,
+      advanceAmount,
       status: "pending",
       createdAt: new Date(),
     });
 
-    res.json(order);
+    res.json({
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      key: process.env.KEY_ID, // send key to frontend
+    });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Order creation failed" });
@@ -143,7 +137,7 @@ app.post("/create-order", async (req, res) => {
 
 
 // =======================================================
-// ✅ 2. VERIFY PAYMENT (SECURE)
+// ✅ 2. VERIFY PAYMENT
 // =======================================================
 app.post("/verify-payment", async (req, res) => {
   try {
@@ -153,7 +147,7 @@ app.post("/verify-payment", async (req, res) => {
       return res.status(400).json({ success: false });
     }
 
-    // 🔐 Verify signature
+    // 🔐 Signature verification
     const expected = crypto
       .createHmac("sha256", process.env.KEY_SECRET)
       .update(order_id + "|" + payment_id)
@@ -163,7 +157,6 @@ app.post("/verify-payment", async (req, res) => {
       return res.status(400).json({ success: false });
     }
 
-    // 🔥 Fetch order
     const orderRef = db.collection("orders").doc(order_id);
     const orderDoc = await orderRef.get();
 
@@ -173,17 +166,11 @@ app.post("/verify-payment", async (req, res) => {
 
     const orderData = orderDoc.data();
 
-    // ✅ Validate slots
-    if (!Array.isArray(orderData.slots) || orderData.slots.length === 0) {
-      return res.status(400).json({ success: false });
-    }
-
-    // ❌ Prevent duplicate booking
     if (orderData.status === "paid") {
       return res.json({ success: true });
     }
 
-    // 🔥 Re-check slot availability (VERY IMPORTANT)
+    // 🔥 Re-check slots
     const bookingSnap = await db
       .collection("bookings")
       .where("turfId", "==", orderData.turfId)
@@ -201,7 +188,7 @@ app.post("/verify-payment", async (req, res) => {
       }
     }
 
-    // 🔥 Verify payment with Razorpay
+    // 🔥 Fetch payment from Razorpay
     const payment = await razorpay.payments.fetch(payment_id);
 
     if (payment.status !== "captured") {
@@ -212,7 +199,7 @@ app.post("/verify-payment", async (req, res) => {
       return res.status(400).json({ success: false });
     }
 
-    // 🔥 Create bookings (atomic)
+    // 🔥 Atomic booking
     const batch = db.batch();
 
     orderData.slots.forEach((slot) => {
@@ -236,69 +223,12 @@ app.post("/verify-payment", async (req, res) => {
     await batch.commit();
 
     res.json({ success: true });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false });
   }
 });
-
-app.get("/pay/:orderId", async (req, res) => {
-  const { orderId } = req.params;
-
-  const orderDoc = await db.collection("orders").doc(orderId).get();
-  if (!orderDoc.exists) {
-    return res.send("Invalid order");
-  }
-
-  const orderData = orderDoc.data();
-
-  res.send(`
-    <html>
-      <head>
-        <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
-      </head>
-      <body>
-        <script>
-          var options = {
-            key: "${process.env.KEY_ID}",
-            amount: "${orderData.advanceAmount * 100}",
-            currency: "INR",
-            name: "Bookora",
-            order_id: "${orderId}",
-            handler: function (response) {
-
-              fetch("https://bookora-backend-95u4.onrender.com/verify-payment", {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                  order_id: response.razorpay_order_id,
-                  payment_id: response.razorpay_payment_id,
-                  signature: response.razorpay_signature
-                })
-              })
-              .then(res => res.json())
-              .then(data => {
-                if (data.success) {
-                  document.body.innerHTML = "<h2>✅ Payment Successful 🎉</h2>";
-                } else {
-                  document.body.innerHTML = "<h2>❌ Payment Verification Failed</h2>";
-                }
-              });
-
-            },
-            theme: { color: "#111111" }
-          };
-
-          var rzp = new Razorpay(options);
-          rzp.open();
-        </script>
-      </body>
-    </html>
-  `);
-});
-
 
 
 // =======================================================
@@ -307,5 +237,5 @@ app.get("/pay/:orderId", async (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log("Server running on port - server.js:310" + PORT);
+  console.log("Server running on port - server.js:240" + PORT);
 });
