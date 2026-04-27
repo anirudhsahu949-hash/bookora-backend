@@ -3,7 +3,6 @@ const Razorpay = require("razorpay");
 const cors = require("cors");
 const crypto = require("crypto");
 const admin = require("firebase-admin");
-require("dotenv").config();
 
 // 🔥 Firebase Admin Init
 try {
@@ -14,9 +13,9 @@ try {
       privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
     }),
   });
-  console.log("Firebase connected ✅ - server.js:17");
+  console.log("Firebase connected ✅ - server.js:16");
 } catch (e) {
-  console.error("Firebase error ❌ - server.js:19", e);
+  console.error("Firebase error ❌ - server.js:18", e);
 }
 
 const db = admin.firestore();
@@ -246,6 +245,71 @@ app.get("/", (req, res) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 
+
+// =======================================================
+// ✅ 3. HOSTED PAYMENT PAGE
+// =======================================================
+app.get("/pay", (req, res) => {
+  const { order_id } = req.query;
+
+  if (!order_id) {
+    return res.send("Invalid order");
+  }
+
+  res.send(`
+  <html>
+    <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+    </head>
+    <body>
+      <script>
+        var options = {
+          key: "${process.env.KEY_ID}",
+          order_id: "${order_id}",
+          name: "Bookora",
+          description: "Turf Booking",
+          theme: { color: "#3399cc" },
+
+          handler: function (response) {
+            fetch("/verify-payment", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({
+                order_id: response.razorpay_order_id,
+                payment_id: response.razorpay_payment_id,
+                signature: response.razorpay_signature
+              })
+            })
+            .then(res => res.json())
+            .then(data => {
+              if (data.success) {
+                window.location.href = "/success";
+              } else {
+                window.location.href = "/failed";
+              }
+            });
+          }
+        };
+
+        var rzp = new Razorpay(options);
+        rzp.open();
+      </script>
+    </body>
+  </html>
+  `);
+});
+
+app.get("/success", (req, res) => {
+  res.send("✅ Payment Successful");
+});
+
+app.get("/failed", (req, res) => {
+  res.send("❌ Payment Failed");
+});
+
 app.listen(PORT, () => {
-  console.log("Server running on port - server.js:250" + PORT);
+  console.log("Server running on port - server.js:314" + PORT);
 });
