@@ -36,7 +36,7 @@ const razorpay = new Razorpay({
 // =======================================================
 app.post("/create-order", async (req, res) => {
   try {
-    const { turfId, slots, dateString } = req.body;
+    const { turfId, slots, dateString, userId } = req.body;
 
     if (!Array.isArray(slots) || slots.length === 0) {
       return res.status(400).json({ error: "Invalid slots" });
@@ -116,11 +116,12 @@ app.post("/create-order", async (req, res) => {
       receipt: "receipt_" + Date.now(),
     });
 
-    // 🔥 Save order in DB
+    // 🔥 Save order in DB — now includes userId
     await db.collection("orders").doc(order.id).set({
       turfId,
       slots,
       dateString,
+      userId: userId || null,       // ✅ FIX: store userId so verify-payment can use it
       totalAmount: total,
       advanceAmount,
       status: "pending",
@@ -131,7 +132,7 @@ app.post("/create-order", async (req, res) => {
       orderId: order.id,
       amount: order.amount,
       currency: order.currency,
-      key: process.env.KEY_ID, // send key to frontend
+      key: process.env.KEY_ID,
     });
 
   } catch (err) {
@@ -149,7 +150,7 @@ app.post("/verify-payment", async (req, res) => {
     const { order_id, payment_id, signature } = req.body;
 
     if (!order_id || !payment_id || !signature) {
-      return res.status(400).json({ success: false });
+      return res.status(400).json({ success: false, error: "Missing fields" });
     }
 
     // 🔐 Signature verification
@@ -159,23 +160,24 @@ app.post("/verify-payment", async (req, res) => {
       .digest("hex");
 
     if (expected !== signature) {
-      return res.status(400).json({ success: false });
+      return res.status(400).json({ success: false, error: "Invalid signature" });
     }
 
     const orderRef = db.collection("orders").doc(order_id);
     const orderDoc = await orderRef.get();
 
     if (!orderDoc.exists) {
-      return res.status(404).json({ success: false });
+      return res.status(404).json({ success: false, error: "Order not found" });
     }
 
     const orderData = orderDoc.data();
 
+    // ✅ Idempotency — already paid, return success
     if (orderData.status === "paid") {
       return res.json({ success: true });
     }
 
-    // 🔥 Re-check slots
+    // 🔥 Re-check slots to prevent double booking
     const bookingSnap = await db
       .collection("bookings")
       .where("turfId", "==", orderData.turfId)
@@ -188,23 +190,23 @@ app.post("/verify-payment", async (req, res) => {
       if (bookedSlots.includes(slot)) {
         return res.status(400).json({
           success: false,
-          error: "Slot already booked",
+          error: `Slot already booked: ${slot}`,
         });
       }
     }
 
-    // 🔥 Fetch payment from Razorpay
+    // 🔥 Fetch payment from Razorpay to verify amount & status
     const payment = await razorpay.payments.fetch(payment_id);
 
     if (payment.status !== "captured") {
-      return res.status(400).json({ success: false });
+      return res.status(400).json({ success: false, error: "Payment not captured" });
     }
 
     if (payment.amount !== orderData.advanceAmount * 100) {
-      return res.status(400).json({ success: false });
+      return res.status(400).json({ success: false, error: "Amount mismatch" });
     }
 
-    // 🔥 Atomic booking
+    // 🔥 Atomic batch — create one booking doc per slot + mark order paid
     const batch = db.batch();
 
     orderData.slots.forEach((slot) => {
@@ -215,6 +217,9 @@ app.post("/verify-payment", async (req, res) => {
         slotTime: slot,
         dateString: orderData.dateString,
         paymentId: payment_id,
+        userId: orderData.userId || null,   // ✅ FIX: persist userId in booking
+        totalAmount: orderData.totalAmount,
+        advanceAmount: orderData.advanceAmount,
         status: "confirmed",
         createdAt: new Date(),
       });
@@ -231,19 +236,9 @@ app.post("/verify-payment", async (req, res) => {
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false });
+    res.status(500).json({ success: false, error: "Verification failed" });
   }
 });
-
-app.get("/", (req, res) => {
-  res.send("Server is running ✅");
-});
-
-
-// =======================================================
-// 🚀 START SERVER
-// =======================================================
-const PORT = process.env.PORT || 5000;
 
 
 // =======================================================
@@ -269,14 +264,12 @@ app.get("/pay", (req, res) => {
           order_id: "${order_id}",
           name: "Bookora",
           description: "Turf Booking",
-          theme: { color: "#3399cc" },
+          theme: { color: "#111111" },
 
           handler: function (response) {
             fetch("/verify-payment", {
               method: "POST",
-              headers: {
-                "Content-Type": "application/json"
-              },
+              headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 order_id: response.razorpay_order_id,
                 payment_id: response.razorpay_payment_id,
@@ -290,7 +283,17 @@ app.get("/pay", (req, res) => {
               } else {
                 window.location.href = "/failed";
               }
+            })
+            .catch(() => {
+              window.location.href = "/failed";
             });
+          },
+
+          modal: {
+            ondismiss: function() {
+              // User closed the modal without paying
+              window.location.href = "/failed";
+            }
           }
         };
 
@@ -303,13 +306,44 @@ app.get("/pay", (req, res) => {
 });
 
 app.get("/success", (req, res) => {
-  res.send("✅ Payment Successful");
+  res.send(`
+    <html>
+      <head><meta name="viewport" content="width=device-width, initial-scale=1.0"/></head>
+      <body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#f5f7fa;">
+        <div style="text-align:center;">
+          <div style="font-size:64px;">✅</div>
+          <h2 style="margin-top:16px;">Payment Successful</h2>
+          <p style="color:#6b7280;">Your booking is confirmed!</p>
+        </div>
+      </body>
+    </html>
+  `);
 });
 
 app.get("/failed", (req, res) => {
-  res.send("❌ Payment Failed");
+  res.send(`
+    <html>
+      <head><meta name="viewport" content="width=device-width, initial-scale=1.0"/></head>
+      <body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#f5f7fa;">
+        <div style="text-align:center;">
+          <div style="font-size:64px;">❌</div>
+          <h2 style="margin-top:16px;">Payment Failed</h2>
+          <p style="color:#6b7280;">Please try again.</p>
+        </div>
+      </body>
+    </html>
+  `);
 });
 
+app.get("/", (req, res) => {
+  res.send("Server is running ✅");
+});
+
+
+// =======================================================
+// 🚀 START SERVER
+// =======================================================
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log("Server running on port - server.js:314" + PORT);
+  console.log("Server running on port - server.js:348" + PORT);
 });
