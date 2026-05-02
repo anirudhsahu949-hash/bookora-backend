@@ -3,8 +3,12 @@ const Razorpay = require("razorpay");
 const cors = require("cors");
 const crypto = require("crypto");
 const admin = require("firebase-admin");
+require("dotenv").config();
 
+
+// =======================================================
 // 🔥 Firebase Admin Init
+// =======================================================
 try {
   admin.initializeApp({
     credential: admin.credential.cert({
@@ -13,9 +17,9 @@ try {
       privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
     }),
   });
-  console.log("Firebase connected ✅ - server.js:16");
+  console.log("Firebase connected ✅ - server.js:20");
 } catch (e) {
-  console.error("Firebase error ❌ - server.js:18", e);
+  console.error("Firebase init error ❌ - server.js:22", e);
 }
 
 const db = admin.firestore();
@@ -24,7 +28,9 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// 🔐 Razorpay instance
+// =======================================================
+// 🔐 Razorpay Instance
+// =======================================================
 const razorpay = new Razorpay({
   key_id: process.env.KEY_ID,
   key_secret: process.env.KEY_SECRET,
@@ -38,22 +44,23 @@ app.post("/create-order", async (req, res) => {
   try {
     const { turfId, slots, dateString, userId } = req.body;
 
-    if (!Array.isArray(slots) || slots.length === 0) {
-      return res.status(400).json({ error: "Invalid slots" });
-    }
-
+    // --- Validate input ---
     if (!turfId || !dateString) {
-      return res.status(400).json({ error: "Invalid request" });
+      return res.status(400).json({ error: "turfId and dateString are required" });
     }
 
+    if (!Array.isArray(slots) || slots.length === 0) {
+      return res.status(400).json({ error: "slots must be a non-empty array" });
+    }
+
+    // --- Fetch turf ---
     const turfDoc = await db.collection("turfs").doc(turfId).get();
     if (!turfDoc.exists) {
       return res.status(404).json({ error: "Turf not found" });
     }
-
     const turf = turfDoc.data();
 
-    // 🔥 Special prices
+    // --- Fetch special prices for this turf + date ---
     const specialSnap = await db
       .collection("specialPrices")
       .where("turfId", "==", turfId)
@@ -62,7 +69,7 @@ app.post("/create-order", async (req, res) => {
 
     const specialPrices = specialSnap.docs.map((d) => d.data());
 
-    // 🔥 Already booked slots
+    // --- Check already booked slots ---
     const bookingSnap = await db
       .collection("bookings")
       .where("turfId", "==", turfId)
@@ -73,14 +80,14 @@ app.post("/create-order", async (req, res) => {
 
     for (const slot of slots) {
       if (bookedSlots.includes(slot)) {
-        return res.status(400).json({
-          error: `Slot already booked: ${slot}`,
-        });
+        return res.status(400).json({ error: `Slot already booked: ${slot}` });
       }
     }
 
-    // 💰 Calculate price
-    let total = 0;
+    // --- Calculate total price ---
+    // slotTime format from frontend: "6:00 AM - 7:00 AM"
+    // We parse the start time to decide day vs night price
+    let totalAmount = 0;
 
     for (const slot of slots) {
       const special = specialPrices.find(
@@ -88,47 +95,58 @@ app.post("/create-order", async (req, res) => {
       );
 
       if (special) {
-        total += Number(special.price);
+        totalAmount += Number(special.price);
       } else {
-        const hour = parseInt(slot.split(":")[0]);
+        // Parse "6:00 AM" from "6:00 AM - 7:00 AM"
+        const startPart = slot.split("-")[0].trim();
+        const timeParts = startPart.match(/(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i);
+
+        let hour = 0;
+        if (timeParts) {
+          hour = parseInt(timeParts[1]);
+          const meridiem = timeParts[3].toUpperCase();
+          if (meridiem === "PM" && hour < 12) hour += 12;
+          if (meridiem === "AM" && hour === 12) hour = 0;
+        }
 
         if (hour >= 6 && hour < 18) {
-          total += Number(turf.dayPrice || turf.price || 0);
+          totalAmount += Number(turf.dayPrice || turf.price || 0);
         } else {
-          total += Number(turf.nightPrice || turf.price || 0);
+          totalAmount += Number(turf.nightPrice || turf.price || 0);
         }
       }
     }
 
-    if (total <= 0) {
-      return res.status(400).json({ error: "Invalid price" });
+    if (totalAmount <= 0) {
+      return res.status(400).json({ error: "Calculated price is invalid" });
     }
 
+    // --- Advance amount ---
     const advanceAmount =
       Number(turf.bookingPrice) > 0
         ? Number(turf.bookingPrice)
-        : total;
+        : totalAmount;
 
-    // 🔥 Create Razorpay order
+    // --- Create Razorpay order ---
     const order = await razorpay.orders.create({
-      amount: advanceAmount * 100,
+      amount: advanceAmount * 100, // in paise
       currency: "INR",
       receipt: "receipt_" + Date.now(),
     });
 
-    // 🔥 Save order in DB — now includes userId
+    // --- Save pending order ---
     await db.collection("orders").doc(order.id).set({
       turfId,
       slots,
-      dateString,
-      userId: userId || null,       // ✅ FIX: store userId so verify-payment can use it
-      totalAmount: total,
+      dateString,               // string — for slot conflict checks
+      userId: userId || null,   // ✅ stored so verify-payment can use it
+      totalAmount,
       advanceAmount,
       status: "pending",
-      createdAt: new Date(),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    res.json({
+    return res.json({
       orderId: order.id,
       amount: order.amount,
       currency: order.currency,
@@ -136,8 +154,8 @@ app.post("/create-order", async (req, res) => {
     });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Order creation failed" });
+    console.error("createorder error: - server.js:157", err.message);
+    return res.status(500).json({ error: err.message || "Order creation failed" });
   }
 });
 
@@ -153,16 +171,17 @@ app.post("/verify-payment", async (req, res) => {
       return res.status(400).json({ success: false, error: "Missing fields" });
     }
 
-    // 🔐 Signature verification
-    const expected = crypto
+    // --- Verify Razorpay signature ---
+    const expectedSignature = crypto
       .createHmac("sha256", process.env.KEY_SECRET)
       .update(order_id + "|" + payment_id)
       .digest("hex");
 
-    if (expected !== signature) {
+    if (expectedSignature !== signature) {
       return res.status(400).json({ success: false, error: "Invalid signature" });
     }
 
+    // --- Fetch order ---
     const orderRef = db.collection("orders").doc(order_id);
     const orderDoc = await orderRef.get();
 
@@ -172,12 +191,12 @@ app.post("/verify-payment", async (req, res) => {
 
     const orderData = orderDoc.data();
 
-    // ✅ Idempotency — already paid, return success
+    // --- Idempotency: already paid ---
     if (orderData.status === "paid") {
       return res.json({ success: true });
     }
 
-    // 🔥 Re-check slots to prevent double booking
+    // --- Re-check slots to prevent race condition ---
     const bookingSnap = await db
       .collection("bookings")
       .where("turfId", "==", orderData.turfId)
@@ -190,12 +209,12 @@ app.post("/verify-payment", async (req, res) => {
       if (bookedSlots.includes(slot)) {
         return res.status(400).json({
           success: false,
-          error: `Slot already booked: ${slot}`,
+          error: `Slot just got booked by someone else: ${slot}`,
         });
       }
     }
 
-    // 🔥 Fetch payment from Razorpay to verify amount & status
+    // --- Verify payment from Razorpay ---
     const payment = await razorpay.payments.fetch(payment_id);
 
     if (payment.status !== "captured") {
@@ -203,40 +222,107 @@ app.post("/verify-payment", async (req, res) => {
     }
 
     if (payment.amount !== orderData.advanceAmount * 100) {
-      return res.status(400).json({ success: false, error: "Amount mismatch" });
+      return res.status(400).json({ success: false, error: "Payment amount mismatch" });
     }
 
-    // 🔥 Atomic batch — create one booking doc per slot + mark order paid
+    // --- Fetch turf for ownerId + turfName ---
+    const turfDoc = await db.collection("turfs").doc(orderData.turfId).get();
+    if (!turfDoc.exists) {
+      return res.status(404).json({ success: false, error: "Turf not found" });
+    }
+
+    const turfData = turfDoc.data();
+    const turfName  = turfData.name    || "";
+    const ownerId   = turfData.ownerId || null;
+
+    // --- Fetch user for userName, phone, email ---
+    let userName  = "";
+    let userPhone = "";
+    let userEmail = "";
+
+    if (orderData.userId) {
+      try {
+        const userDoc = await db.collection("users").doc(orderData.userId).get();
+        if (userDoc.exists) {
+          const u = userDoc.data();
+          userName  = u.name  || "";
+          userPhone = u.phone || "";
+          userEmail = u.email || "";
+        }
+      } catch (e) {
+        // Non-critical — booking still proceeds
+        console.warn("User fetch failed (noncritical): - server.js:254", e.message);
+      }
+    }
+
+    // --- Build real Firestore Timestamp from dateString ---
+    // dateString example: "Mon Apr 28 2026"
+    // Stored as Timestamp so owner screens can:
+    //   - sort history newest-first
+    //   - filter today / upcoming correctly
+    //   - display formatted dates properly
+    const parsedDate  = new Date(orderData.dateString);
+    const bookingDate = admin.firestore.Timestamp.fromDate(
+      isNaN(parsedDate.getTime()) ? new Date() : parsedDate
+    );
+
+    // --- Determine payment status ---
+    const paymentStatus =
+      orderData.advanceAmount >= orderData.totalAmount ? "full" : "partial";
+
+    // --- Atomic batch: one booking doc per slot + mark order paid ---
     const batch = db.batch();
 
     orderData.slots.forEach((slot) => {
-      const ref = db.collection("bookings").doc();
+      const bookingRef = db.collection("bookings").doc();
 
-      batch.set(ref, {
-        turfId: orderData.turfId,
-        slotTime: slot,
-        dateString: orderData.dateString,
-        paymentId: payment_id,
-        userId: orderData.userId || null,   // ✅ FIX: persist userId in booking
-        totalAmount: orderData.totalAmount,
-        advanceAmount: orderData.advanceAmount,
-        status: "confirmed",
-        createdAt: new Date(),
+      batch.set(bookingRef, {
+        // ── IDs ──────────────────────────────────────────────────────────
+        turfId:   orderData.turfId,
+        userId:   orderData.userId || null,
+        ownerId:  ownerId,            // ✅ owner queries: where("ownerId","==",uid)
+
+        // ── Display names (denormalized) ─────────────────────────────────
+        turfName:   turfName,         // ✅ shown in owner booking cards
+        userName:   userName,         // ✅ shown in owner booking cards
+        userPhone:  userPhone,        // ✅ owner contact info
+        userEmail:  userEmail,        // ✅ owner contact info
+
+        // ── Date ─────────────────────────────────────────────────────────
+        date:       bookingDate,      // ✅ Firestore Timestamp — for sorting & filtering
+        dateString: orderData.dateString, // ✅ plain string — for slot conflict checks only
+
+        // ── Slot ─────────────────────────────────────────────────────────
+        slotTime: slot,               // e.g. "6:00 AM - 7:00 AM"
+
+        // ── Payment ──────────────────────────────────────────────────────
+        paymentId:       payment_id,
+        totalAmount:     orderData.totalAmount,    // ✅ full price
+        advanceAmount:   orderData.advanceAmount,  // ✅ paid online
+        remainingAmount: orderData.totalAmount - orderData.advanceAmount, // ✅ collect at turf
+
+        // ── Status ───────────────────────────────────────────────────────
+        status:        "confirmed",   // confirmed → completed / cancelled by owner
+        paymentStatus: paymentStatus, // "partial" or "full"
+
+        // ── Metadata ─────────────────────────────────────────────────────
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     });
 
     batch.update(orderRef, {
-      status: "paid",
+      status:    "paid",
       paymentId: payment_id,
+      paidAt:    admin.firestore.FieldValue.serverTimestamp(),
     });
 
     await batch.commit();
 
-    res.json({ success: true });
+    return res.json({ success: true });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, error: "Verification failed" });
+    console.error("verifypayment error: - server.js:324", err.message);
+    return res.status(500).json({ success: false, error: err.message || "Verification failed" });
   }
 });
 
@@ -248,102 +334,183 @@ app.get("/pay", (req, res) => {
   const { order_id } = req.query;
 
   if (!order_id) {
-    return res.send("Invalid order");
+    return res.status(400).send("Invalid order");
   }
 
   res.send(`
-  <html>
-    <head>
-      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
-    </head>
-    <body>
-      <script>
-        var options = {
-          key: "${process.env.KEY_ID}",
-          order_id: "${order_id}",
-          name: "Bookora",
-          description: "Turf Booking",
-          theme: { color: "#111111" },
-
-          handler: function (response) {
-            fetch("/verify-payment", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                order_id: response.razorpay_order_id,
-                payment_id: response.razorpay_payment_id,
-                signature: response.razorpay_signature
-              })
-            })
-            .then(res => res.json())
-            .then(data => {
-              if (data.success) {
-                window.location.href = "/success";
-              } else {
-                window.location.href = "/failed";
-              }
-            })
-            .catch(() => {
-              window.location.href = "/failed";
-            });
-          },
-
-          modal: {
-            ondismiss: function() {
-              // User closed the modal without paying
-              window.location.href = "/failed";
-            }
+    <html>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Bookora Payment</title>
+        <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body {
+            background: #f5f7fa;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            font-family: sans-serif;
           }
-        };
+          .loader { text-align: center; color: #6b7280; }
+          .loader p { margin-top: 16px; font-size: 16px; font-weight: 600; }
+        </style>
+      </head>
+      <body>
+        <div class="loader">
+          <div style="font-size:52px;">⏳</div>
+          <p>Opening payment...</p>
+        </div>
 
-        var rzp = new Razorpay(options);
-        rzp.open();
-      </script>
-    </body>
-  </html>
+        <script>
+          var options = {
+            key: "${process.env.KEY_ID}",
+            order_id: "${order_id}",
+            name: "Bookora",
+            description: "Turf Booking",
+            theme: { color: "#111111" },
+
+            handler: function (response) {
+              fetch("/verify-payment", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  order_id:   response.razorpay_order_id,
+                  payment_id: response.razorpay_payment_id,
+                  signature:  response.razorpay_signature,
+                }),
+              })
+              .then((res) => res.json())
+              .then((data) => {
+                window.location.href = data.success ? "/success" : "/failed";
+              })
+              .catch(() => {
+                window.location.href = "/failed";
+              });
+            },
+
+            modal: {
+              ondismiss: function () {
+                // User closed Razorpay modal without paying
+                window.location.href = "/failed";
+              },
+            },
+          };
+
+          var rzp = new Razorpay(options);
+          rzp.open();
+        </script>
+      </body>
+    </html>
   `);
 });
 
+
+// =======================================================
+// ✅ 4. SUCCESS PAGE
+// =======================================================
 app.get("/success", (req, res) => {
   res.send(`
     <html>
-      <head><meta name="viewport" content="width=device-width, initial-scale=1.0"/></head>
-      <body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#f5f7fa;">
-        <div style="text-align:center;">
-          <div style="font-size:64px;">✅</div>
-          <h2 style="margin-top:16px;">Payment Successful</h2>
-          <p style="color:#6b7280;">Your booking is confirmed!</p>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+        <title>Payment Successful</title>
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body {
+            background: #f5f7fa;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            font-family: sans-serif;
+            padding: 20px;
+          }
+          .card {
+            background: #fff;
+            border-radius: 24px;
+            padding: 40px 28px;
+            text-align: center;
+            max-width: 360px;
+            width: 100%;
+            border: 1px solid #e5e7eb;
+          }
+          .icon { font-size: 64px; }
+          h2 { margin-top: 20px; font-size: 22px; font-weight: 800; color: #111; }
+          p  { margin-top: 10px; color: #6b7280; font-size: 15px; line-height: 1.6; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="icon">✅</div>
+          <h2>Booking Confirmed!</h2>
+          <p>Your payment was successful and your slot is booked. You can close this and return to the app.</p>
         </div>
       </body>
     </html>
   `);
 });
 
+
+// =======================================================
+// ✅ 5. FAILED PAGE
+// =======================================================
 app.get("/failed", (req, res) => {
   res.send(`
     <html>
-      <head><meta name="viewport" content="width=device-width, initial-scale=1.0"/></head>
-      <body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;background:#f5f7fa;">
-        <div style="text-align:center;">
-          <div style="font-size:64px;">❌</div>
-          <h2 style="margin-top:16px;">Payment Failed</h2>
-          <p style="color:#6b7280;">Please try again.</p>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+        <title>Payment Failed</title>
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body {
+            background: #f5f7fa;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            font-family: sans-serif;
+            padding: 20px;
+          }
+          .card {
+            background: #fff;
+            border-radius: 24px;
+            padding: 40px 28px;
+            text-align: center;
+            max-width: 360px;
+            width: 100%;
+            border: 1px solid #e5e7eb;
+          }
+          .icon { font-size: 64px; }
+          h2 { margin-top: 20px; font-size: 22px; font-weight: 800; color: #111; }
+          p  { margin-top: 10px; color: #6b7280; font-size: 15px; line-height: 1.6; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="icon">❌</div>
+          <h2>Payment Failed</h2>
+          <p>Something went wrong or payment was cancelled. Please go back to the app and try again.</p>
         </div>
       </body>
     </html>
   `);
 });
 
+
+// =======================================================
+// ✅ Health Check
+// =======================================================
 app.get("/", (req, res) => {
-  res.send("Server is running ✅");
+  res.send("Bookora server running ✅");
 });
 
 
 // =======================================================
-// 🚀 START SERVER
+// 🚀 Start Server
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log("Server running on port - server.js:348" + PORT);
+  console.log(`Server running on port ${PORT} - server.js:515`);
 });
