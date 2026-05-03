@@ -314,14 +314,6 @@ app.post("/verify-payment", async (req, res) => {
     const bookedSlots = bookingSnap.docs.map(
       (d) => d.data().slotTime
     );
-    const parsedDate = new Date(orderData.dateString);
-
-const bookingDate =
-  admin.firestore.Timestamp.fromDate(
-    isNaN(parsedDate.getTime())
-      ? new Date()
-      : parsedDate
-  );
 
     for (const slot of orderData.slots) {
       if (bookedSlots.includes(slot)) {
@@ -410,69 +402,58 @@ const bookingDate =
     // =======================================================
     // ✅ Create Timestamp
     // =======================================================
-    const parsedDate = new Date(
-      orderData.dateString
-    );
+  const parsedDate = new Date(orderData.dateString);
 
-    const bookingDate =
-      admin.firestore.Timestamp.fromDate(
-        isNaN(parsedDate.getTime())
-          ? new Date()
-          : parsedDate
-      );
+const bookingDate =
+  admin.firestore.Timestamp.fromDate(
+    isNaN(parsedDate.getTime())
+      ? new Date()
+      : parsedDate
+  );
 
-    // =======================================================
-    // ✅ Payment Status
-    // =======================================================
-    const paymentStatus =
-      orderData.advanceAmount >=
-      orderData.totalAmount
+for (const slot of orderData.slots) {
+
+  
+  const bookingId =
+    `${orderData.turfId}_${orderData.dateString}_${slot}`;
+
+  const bookingRef = db
+    .collection("bookings")
+    .doc(bookingId);
+
+  batch.set(bookingRef, {
+    turfId: orderData.turfId,
+    userId: orderData.userId || null,
+    ownerId: turfData.ownerId || null,
+
+    turfName: turfData.name || "",
+
+    date: bookingDate, // ✅ IMPORTANT FIX
+
+    dateString: orderData.dateString,
+    slotTime: slot,
+
+    paymentId: paymentId,
+
+    totalAmount: orderData.totalAmount,
+    advanceAmount:
+      orderData.advanceAmount,
+
+    remainingAmount:
+      orderData.totalAmount -
+      orderData.advanceAmount,
+
+    status: "confirmed",
+
+    paymentStatus:
+      orderData.advanceAmount >= orderData.totalAmount
         ? "full"
-        : "partial";
+        : "partial",
 
-    // =======================================================
-    // ✅ Atomic Batch
-    // =======================================================
-    const batch = db.batch();
-
-    orderData.slots.forEach((slot) => {
-      const bookingRef = db
-        .collection("bookings")
-        .doc();
-
-      batch.set(bookingRef, {
-        turfId: orderData.turfId,
-        userId: orderData.userId || null,
-        ownerId: ownerId,
-
-        turfName: turfName,
-        userName: userName,
-        userPhone: userPhone,
-        userEmail: userEmail,
-
-        date: bookingDate,
-        dateString: orderData.dateString,
-        date: bookingDate,
-
-        slotTime: slot,
-
-        paymentId: payment_id,
-
-        totalAmount: orderData.totalAmount,
-        advanceAmount:
-          orderData.advanceAmount,
-
-        remainingAmount:
-          orderData.totalAmount -
-          orderData.advanceAmount,
-
-        status: "confirmed",
-        paymentStatus: paymentStatus,
-
-        createdAt:
-          admin.firestore.FieldValue.serverTimestamp(),
-      });
-    });
+    createdAt:
+      admin.firestore.FieldValue.serverTimestamp(),
+  });
+}
 
     // =======================================================
     // ✅ Update Order
