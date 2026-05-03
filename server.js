@@ -367,6 +367,21 @@ app.post("/verify-payment", async (req, res) => {
 
     const turfData = turfDoc.data();
 
+    const parsedDate = new Date(orderData.dateString);
+
+const bookingDate =
+  admin.firestore.Timestamp.fromDate(
+    isNaN(parsedDate.getTime())
+      ? new Date()
+      : parsedDate
+  );
+
+const paymentStatus =
+  orderData.advanceAmount >=
+  orderData.totalAmount
+    ? "full"
+    : "partial";
+
     const turfName = turfData.name || "";
     const ownerId = turfData.ownerId || null;
 
@@ -400,9 +415,11 @@ app.post("/verify-payment", async (req, res) => {
     }
 
     // =======================================================
-    // ✅ Create Timestamp
-    // =======================================================
-  const parsedDate = new Date(orderData.dateString);
+// ✅ Create Timestamp
+// =======================================================
+const parsedDate = new Date(
+  orderData.dateString
+);
 
 const bookingDate =
   admin.firestore.Timestamp.fromDate(
@@ -411,9 +428,21 @@ const bookingDate =
       : parsedDate
   );
 
-for (const slot of orderData.slots) {
+// =======================================================
+// ✅ Payment Status
+// =======================================================
+const paymentStatus =
+  orderData.advanceAmount >=
+  orderData.totalAmount
+    ? "full"
+    : "partial";
 
-  
+// =======================================================
+// ✅ Atomic Batch
+// =======================================================
+const batch = db.batch();
+
+for (const slot of orderData.slots) {
   const bookingId =
     `${orderData.turfId}_${orderData.dateString}_${slot}`;
 
@@ -424,18 +453,23 @@ for (const slot of orderData.slots) {
   batch.set(bookingRef, {
     turfId: orderData.turfId,
     userId: orderData.userId || null,
-    ownerId: turfData.ownerId || null,
+    ownerId: ownerId,
 
-    turfName: turfData.name || "",
+    turfName: turfName,
 
-    date: bookingDate, // ✅ IMPORTANT FIX
+    userName: userName,
+    userPhone: userPhone,
+    userEmail: userEmail,
+
+    date: bookingDate,
 
     dateString: orderData.dateString,
     slotTime: slot,
 
-    paymentId: paymentId,
+    paymentId: payment_id,
 
     totalAmount: orderData.totalAmount,
+
     advanceAmount:
       orderData.advanceAmount,
 
@@ -445,15 +479,13 @@ for (const slot of orderData.slots) {
 
     status: "confirmed",
 
-    paymentStatus:
-      orderData.advanceAmount >= orderData.totalAmount
-        ? "full"
-        : "partial",
+    paymentStatus: paymentStatus,
 
     createdAt:
       admin.firestore.FieldValue.serverTimestamp(),
   });
 }
+
 
     // =======================================================
     // ✅ Update Order
@@ -592,11 +624,14 @@ app.post("/razorpay-webhook", async (req, res) => {
           .doc(bookingId);
 
         batch.set(bookingRef, {
+          
+
           turfId: orderData.turfId,
           userId: orderData.userId || null,
           ownerId: turfData.ownerId || null,
 
           turfName: turfData.name || "",
+          date: bookingDate,
 
           dateString: orderData.dateString,
           slotTime: slot,
@@ -612,6 +647,7 @@ app.post("/razorpay-webhook", async (req, res) => {
             orderData.advanceAmount,
 
           status: "confirmed",
+          paymentStatus: paymentStatus,
 
           createdAt:
             admin.firestore.FieldValue.serverTimestamp(),
