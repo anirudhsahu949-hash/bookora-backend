@@ -8,6 +8,18 @@ require("dotenv").config();
 // =======================================================
 // 🔥 Firebase Admin Init
 // =======================================================
+const requiredEnv = [
+  "FIREBASE_PROJECT_ID",
+  "FIREBASE_CLIENT_EMAIL",
+  "FIREBASE_PRIVATE_KEY",
+];
+
+for (const key of requiredEnv) {
+  if (!process.env[key]) {
+    throw new Error(`Missing environment variable: ${key}`);
+  }
+}
+
 try {
   admin.initializeApp({
     credential: admin.credential.cert({
@@ -17,16 +29,22 @@ try {
     }),
   });
 
-  console.log("Firebase connected ✅ - server.js:20");
+  console.log("Firebase connected ✅ - server.js:32");
 } catch (e) {
-  console.error("Firebase init error ❌ - server.js:22", e);
+  console.error("Firebase init error ❌ - server.js:34", e);
 }
 
 const db = admin.firestore();
 
 const app = express();
 
-app.use(express.json());
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf.toString();
+    },
+  })
+);
 app.use(cors());
 
 // =======================================================
@@ -462,6 +480,23 @@ app.post("/verify-payment", async (req, res) => {
     // ✅ Commit Batch
     // =======================================================
     await batch.commit();
+    const lockSnap = await db
+  .collection("slotLocks")
+  .where("turfId", "==", orderData.turfId)
+  .where("dateString", "==", orderData.dateString)
+  .get();
+
+const deletePromises = [];
+
+lockSnap.docs.forEach((docSnap) => {
+  const data = docSnap.data();
+
+  if (orderData.slots.includes(data.slotTime)) {
+    deletePromises.push(docSnap.ref.delete());
+  }
+});
+
+await Promise.all(deletePromises);
 
     return res.json({
       success: true,
@@ -476,6 +511,180 @@ app.post("/verify-payment", async (req, res) => {
       success: false,
       error:
         err.message || "Verification failed",
+    });
+  }
+});
+
+app.post("/razorpay-webhook", async (req, res) => {
+  try {
+    const webhookSignature =
+      req.headers["x-razorpay-signature"];
+
+    const expectedSignature = crypto
+      .createHmac(
+        "sha256",
+        process.env.RAZORPAY_WEBHOOK_SECRET
+      )
+      .update(req.rawBody)
+      .digest("hex");
+
+    if (webhookSignature !== expectedSignature) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid webhook signature",
+      });
+    }
+
+    const event = req.body.event;
+
+    // ===================================================
+    // ✅ PAYMENT CAPTURED
+    // ===================================================
+    if (event === "payment.captured") {
+      const payment = req.body.payload.payment.entity;
+
+      const orderId = payment.order_id;
+      const paymentId = payment.id;
+
+      const orderRef = db
+        .collection("orders")
+        .doc(orderId);
+
+      const orderDoc = await orderRef.get();
+
+      if (!orderDoc.exists) {
+        return res.status(404).json({
+          success: false,
+          error: "Order not found",
+        });
+      }
+
+      const orderData = orderDoc.data();
+
+      // ===============================================
+      // ✅ Prevent duplicate booking
+      // ===============================================
+      if (orderData.status === "paid") {
+        return res.json({
+          success: true,
+          message: "Already processed",
+        });
+      }
+
+      // ===============================================
+      // ✅ Fetch turf
+      // ===============================================
+      const turfDoc = await db
+        .collection("turfs")
+        .doc(orderData.turfId)
+        .get();
+
+      if (!turfDoc.exists) {
+        return res.status(404).json({
+          success: false,
+          error: "Turf not found",
+        });
+      }
+
+      const turfData = turfDoc.data();
+
+      // ===============================================
+      // ✅ Create booking batch
+      // ===============================================
+      const batch = db.batch();
+
+      for (const slot of orderData.slots) {
+        const bookingId =
+          `${orderData.turfId}_${orderData.dateString}_${slot}`;
+
+        const bookingRef = db
+          .collection("bookings")
+          .doc(bookingId);
+
+        batch.set(bookingRef, {
+          turfId: orderData.turfId,
+          userId: orderData.userId || null,
+          ownerId: turfData.ownerId || null,
+
+          turfName: turfData.name || "",
+
+          dateString: orderData.dateString,
+          slotTime: slot,
+
+          paymentId: paymentId,
+
+          totalAmount: orderData.totalAmount,
+          advanceAmount:
+            orderData.advanceAmount,
+
+          remainingAmount:
+            orderData.totalAmount -
+            orderData.advanceAmount,
+
+          status: "confirmed",
+
+          createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+
+      batch.update(orderRef, {
+        status: "paid",
+        paymentId: paymentId,
+
+        paidAt:
+          admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      await batch.commit();
+
+      // ===============================================
+      // ✅ Delete locks
+      // ===============================================
+      const lockSnap = await db
+        .collection("slotLocks")
+        .where("turfId", "==", orderData.turfId)
+        .where(
+          "dateString",
+          "==",
+          orderData.dateString
+        )
+        .get();
+
+      const deletePromises = [];
+
+      lockSnap.docs.forEach((docSnap) => {
+        const data = docSnap.data();
+
+        if (
+          orderData.slots.includes(data.slotTime)
+        ) {
+          deletePromises.push(
+            docSnap.ref.delete()
+          );
+        }
+      });
+
+      await Promise.all(deletePromises);
+
+      console.log(
+        "Webhook booking success:",
+        orderId
+      );
+    }
+
+    return res.json({
+      success: true,
+    });
+  } catch (err) {
+    console.error(
+      "Webhook error:",
+      err.message
+    );
+
+    return res.status(500).json({
+      success: false,
+      error: err.message,
     });
   }
 });
