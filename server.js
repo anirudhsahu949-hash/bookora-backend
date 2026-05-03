@@ -363,52 +363,56 @@ app.get("/pay", (req, res) => {
           <p>Opening payment...</p>
         </div>
 
-        <script>
-          var options = {
-            key: "${process.env.KEY_ID}",
-            order_id: "${order_id}",
-            name: "Bookora",
-            description: "Turf Booking",
-            method: {
+      <script>
+  var options = {
+    key: "${process.env.KEY_ID}",
+    order_id: "${order_id}",
+    name: "Bookora",
+    description: "Turf Booking",
+
+    method: {
       upi: true,
       card: true,
-       netbanking: true,
-       wallet: true,
+      netbanking: true,
+      wallet: true,
     },
-            theme: { color: "#111111" },
-            
-            console.log("VERIFY BODY: - server.js:380", req.body);
 
-            handler: function (response) {
-              fetch("https://bookora-backend-95u4.onrender.com//verify-payment", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  order_id:   response.razorpay_order_id,
-                  payment_id: response.razorpay_payment_id,
-                  signature:  response.razorpay_signature,
-                }),
-              })
-              .then((res) => res.json())
-              .then((data) => {
-                window.location.href = data.success ? "/success" : "/failed";
-              })
-              .catch(() => {
-                window.location.href = "/failed";
-              });
-            },
+    theme: { color: "#111111" },
 
-            modal: {
-              ondismiss: function () {
-                // User closed Razorpay modal without paying
-                window.location.href = "/failed";
-              },
-            },
-          };
+    handler: function (response) {
 
-          var rzp = new Razorpay(options);
-          rzp.open();
-        </script>
+      console.log("VERIFY BODY: - server.js:384", response);
+
+      fetch("https://bookora-backend-95u4.onrender.com/verify-payment", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          order_id: response.razorpay_order_id,
+          payment_id: response.razorpay_payment_id,
+          signature: response.razorpay_signature,
+        }),
+      })
+      .then((res) => res.json())
+      .then((data) => {
+        window.location.href = data.success ? "/success" : "/failed";
+      })
+      .catch(() => {
+        window.location.href = "/failed";
+      });
+    },
+
+    modal: {
+      ondismiss: function () {
+        window.location.href = "/failed";
+      },
+    },
+  };
+
+  var rzp = new Razorpay(options);
+  rzp.open();
+</script>
       </body>
     </html>
   `);
@@ -520,5 +524,5 @@ app.get("/", (req, res) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT} - server.js:523`);
+  console.log(`Server running on port ${PORT} - server.js:527`);
 });
