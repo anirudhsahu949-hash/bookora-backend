@@ -369,10 +369,18 @@ app.get("/pay", (req, res) => {
             order_id: "${order_id}",
             name: "Bookora",
             description: "Turf Booking",
+            method: {
+      upi: true,
+      card: true,
+       netbanking: true,
+       wallet: true,
+    },
             theme: { color: "#111111" },
+            
+            console.log("VERIFY BODY: - server.js:380", req.body);
 
             handler: function (response) {
-              fetch("/verify-payment", {
+              fetch("https://bookora-backend-95u4.onrender.com//verify-payment", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -512,5 +520,5 @@ app.get("/", (req, res) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT} - server.js:515`);
+  console.log(`Server running on port ${PORT} - server.js:523`);
 });
