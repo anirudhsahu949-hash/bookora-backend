@@ -314,6 +314,14 @@ app.post("/verify-payment", async (req, res) => {
     const bookedSlots = bookingSnap.docs.map(
       (d) => d.data().slotTime
     );
+    const parsedDate = new Date(orderData.dateString);
+
+const bookingDate =
+  admin.firestore.Timestamp.fromDate(
+    isNaN(parsedDate.getTime())
+      ? new Date()
+      : parsedDate
+  );
 
     for (const slot of orderData.slots) {
       if (bookedSlots.includes(slot)) {
@@ -444,6 +452,7 @@ app.post("/verify-payment", async (req, res) => {
 
         date: bookingDate,
         dateString: orderData.dateString,
+        date: bookingDate,
 
         slotTime: slot,
 
