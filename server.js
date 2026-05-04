@@ -113,9 +113,12 @@ app.post("/create-order", async (req, res) => {
       .where("dateString", "==", dateString)
       .get();
 
-    const bookedSlots = bookingSnap.docs.map(
-      (d) => d.data().slotTime
-    );
+   const bookedSlots = bookingSnap.docs
+  .map((d) => d.data())
+  .filter(
+    (b) => b.status !== "cancelled"
+  )
+  .map((b) => b.slotTime);
 
     for (const slot of slots) {
       if (bookedSlots.includes(slot)) {
@@ -201,20 +204,47 @@ app.post("/create-order", async (req, res) => {
     // ===================================================
     // ✅ Save Order
     // ===================================================
-    await db.collection("orders").doc(order.id).set({
-      turfId,
-      slots,
-      dateString,
-      userId: userId || null,
+   await db.collection("orders").doc(order.id).set({
+  turfId,
 
-      totalAmount,
-      advanceAmount,
+  turfName: turf.name || "",
 
-      status: "pending",
+  turfLocation: turf.location || "",
 
-      createdAt:
-        admin.firestore.FieldValue.serverTimestamp(),
-    });
+  image:
+    Array.isArray(turf.images) &&
+    turf.images.length > 0
+      ? turf.images[0]
+      : turf.image || "",
+
+  ownerId: turf.ownerId || null,
+
+  ownerName: turf.ownerName || "",
+
+  mapLink: turf.mapLink || "",
+
+  userId: userId || null,
+
+  slots,
+
+  dateString,
+
+  totalAmount,
+
+  advanceAmount,
+
+  remainingAmount:
+    totalAmount - advanceAmount,
+
+  orderId: order.id,
+
+  orderStatus: "created",
+
+  paymentStatus: "pending",
+
+  createdAt:
+    admin.firestore.FieldValue.serverTimestamp(),
+});
 
     return res.json({
       orderId: order.id,
@@ -223,7 +253,7 @@ app.post("/create-order", async (req, res) => {
       key: process.env.KEY_ID,
     });
   } catch (err) {
-    console.error("createorder error: - server.js:226", err);
+    console.error("createorder error: - server.js:256", err);
 
     return res.status(500).json({
       error: err.message,
@@ -282,7 +312,7 @@ app.post("/verify-payment", async (req, res) => {
     // ===================================================
     // ✅ Already Paid
     // ===================================================
-    if (orderData.status === "paid") {
+    if (orderData.orderStatus === "paid") {
       return res.json({
         success: true,
       });
@@ -366,6 +396,30 @@ app.post("/verify-payment", async (req, res) => {
         ? "full"
         : "partial";
 
+        
+        const existingBookingSnap = await db
+  .collection("bookings")
+  .where("turfId", "==", orderData.turfId)
+  .where("dateString", "==", orderData.dateString)
+  .get();
+
+const existingSlots = existingBookingSnap.docs
+  .map((d) => d.data())
+  .filter(
+    (b) => b.status !== "cancelled"
+  )
+  .map((b) => b.slotTime);
+
+for (const slot of orderData.slots) {
+  if (existingSlots.includes(slot)) {
+    return res.status(400).json({
+      success: false,
+      error:
+        "Slot already booked during payment",
+    });
+  }
+}
+
     // ===================================================
     // ✅ Batch
     // ===================================================
@@ -379,46 +433,77 @@ app.post("/verify-payment", async (req, res) => {
         .collection("bookings")
         .doc(bookingId);
 
-      batch.set(bookingRef, {
-        turfId: orderData.turfId,
-        userId: orderData.userId || null,
-        ownerId: ownerId,
+        
 
-        turfName: turfName,
+   batch.create(bookingRef, {
+  turfId: orderData.turfId,
 
-        userName: userName,
-        userPhone: userPhone,
-        userEmail: userEmail,
+  turfName: orderData.turfName,
 
-        date: bookingDate,
+  turfLocation: orderData.turfLocation,
 
-        dateString: orderData.dateString,
-        slotTime: slot,
+  image: orderData.image,
 
-        paymentId: payment_id,
+  ownerId: orderData.ownerId,
 
-        totalAmount: orderData.totalAmount,
-        advanceAmount:
-          orderData.advanceAmount,
+  ownerName: orderData.ownerName,
 
-        remainingAmount:
-          orderData.totalAmount -
-          orderData.advanceAmount,
+  mapLink: orderData.mapLink,
 
-        status: "confirmed",
+  userId: orderData.userId || null,
 
-        paymentStatus: paymentStatus,
+  userName: userName,
 
-        createdAt:
-          admin.firestore.FieldValue.serverTimestamp(),
-      });
+  userPhone: userPhone,
+
+  userEmail: userEmail,
+
+  date: bookingDate,
+
+  dateString: orderData.dateString,
+
+  slotTime: slot,
+
+  selectedSlots: orderData.slots,
+
+  paymentId: payment_id,
+
+  orderId: order_id,
+
+  totalAmount: orderData.totalAmount,
+
+  advanceAmount:
+    orderData.advanceAmount,
+
+  remainingAmount:
+    orderData.remainingAmount,
+
+  status: "confirmed",
+
+  paymentStatus: paymentStatus,
+
+  refundStatus: "not_applicable",
+
+  refundAmount: 0,
+
+  cancelledAt: null,
+
+  cancelledBy: null,
+
+  cancellationReason: null,
+
+  cancellationTimeLeft: null,
+
+  createdAt:
+    admin.firestore.FieldValue.serverTimestamp(),
+});
     }
 
     // ===================================================
     // ✅ Update Order
     // ===================================================
     batch.update(orderRef, {
-      status: "paid",
+      orderStatus: "paid",
       paymentId: payment_id,
 
       paidAt:
@@ -452,7 +537,18 @@ app.post("/verify-payment", async (req, res) => {
       success: true,
     });
   } catch (err) {
-    console.error("verifypayment error: - server.js:455", err);
+    console.error("verifypayment error: - server.js:540", err);
+
+    if (order_id) {
+  await db
+    .collection("orders")
+    .doc(order_id)
+    .update({
+      orderStatus: "failed",
+      failedAt:
+        admin.firestore.FieldValue.serverTimestamp(),
+    });
+}
 
     return res.status(500).json({
       success: false,
@@ -474,5 +570,5 @@ app.get("/", (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:477`);
+  console.log(`Server running on ${PORT} ✅ - server.js:573`);
 });
