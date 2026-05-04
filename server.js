@@ -118,7 +118,7 @@ app.post("/create-order", async (req, res) => {
   .filter(
     (b) => b.status !== "cancelled"
   )
-  .map((b) => b.slotTime);
+  .flatMap((b) => b.selectedSlots || []);
 
     for (const slot of slots) {
       if (bookedSlots.includes(slot)) {
@@ -408,7 +408,7 @@ const existingSlots = existingBookingSnap.docs
   .filter(
     (b) => b.status !== "cancelled"
   )
-  .map((b) => b.slotTime);
+  .flatMap((b) => b.selectedSlots || []);
 
 for (const slot of orderData.slots) {
   if (existingSlots.includes(slot)) {
@@ -425,17 +425,14 @@ for (const slot of orderData.slots) {
     // ===================================================
     const batch = db.batch();
 
-    for (const slot of orderData.slots) {
-      const bookingId =
-        `${orderData.turfId}_${orderData.dateString}_${slot}`;
+const bookingId =
+  `${orderData.turfId}_${Date.now()}`;
 
-      const bookingRef = db
-        .collection("bookings")
-        .doc(bookingId);
+const bookingRef = db
+  .collection("bookings")
+  .doc(bookingId);
 
-        
-
-   batch.create(bookingRef, {
+batch.create(bookingRef, {
   turfId: orderData.turfId,
 
   turfName: orderData.turfName,
@@ -461,8 +458,6 @@ for (const slot of orderData.slots) {
   date: bookingDate,
 
   dateString: orderData.dateString,
-
-  slotTime: slot,
 
   selectedSlots: orderData.slots,
 
@@ -497,7 +492,6 @@ for (const slot of orderData.slots) {
   createdAt:
     admin.firestore.FieldValue.serverTimestamp(),
 });
-    }
 
     // ===================================================
     // ✅ Update Order
@@ -537,7 +531,7 @@ for (const slot of orderData.slots) {
       success: true,
     });
   } catch (err) {
-    console.error("verifypayment error: - server.js:540", err);
+    console.error("verifypayment error: - server.js:534", err);
 
     if (order_id) {
   await db
@@ -570,5 +564,5 @@ app.get("/", (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:573`);
+  console.log(`Server running on ${PORT} ✅ - server.js:567`);
 });
