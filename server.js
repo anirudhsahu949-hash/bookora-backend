@@ -252,12 +252,11 @@ if (isNaN(hourlyPrice)) {
 totalAmount += hourlyPrice / 2;
   }
 }
- {
-        return res.status(400).json({
-          error: "Invalid amount",
-        });
-      }
-
+ if (totalAmount <= 0) {
+  return res.status(400).json({
+    error: "Invalid amount",
+  });
+}
       // ===================================================
       // ✅ Booking Type
       // ===================================================
@@ -813,7 +812,7 @@ app.post(
       });
 
     } catch (err) {
-      console.error("verifypayment error: - server.js:816", err);
+      console.error("verifypayment error: - server.js:815", err);
 
       try {
         if (order_id) {
@@ -833,7 +832,7 @@ app.post(
           }
         }
       } catch (e) {
-        console.log("Failed order update: - server.js:836", e);
+        console.log("Failed order update: - server.js:835", e);
       }
 
       
