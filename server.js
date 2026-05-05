@@ -262,7 +262,7 @@ totalAmount += hourlyPrice / 2;
       // ===================================================
 
       const finalBookingType =
-        bookingType === "full"
+        bookingType === "full" 
           ? "full"
           : "advance";
 
