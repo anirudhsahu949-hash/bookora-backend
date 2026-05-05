@@ -232,20 +232,24 @@ for (const slot of slots) {
   } else {
     const hour = parseHour(slot);
 
-    let hourlyPrice = 0;
+   let hourlyPrice = 0;
 
-    if (hour >= 6 && hour < 18) {
-      hourlyPrice = Number(
-        turf.dayPrice || turf.price || 0
-      );
-    } else {
-      hourlyPrice = Number(
-        turf.nightPrice || turf.price || 0
-      );
-    }
+if (hour >= 6 && hour < 18) {
+  hourlyPrice = parseFloat(
+    turf.dayPrice || turf.price || 0
+  );
+} else {
+  hourlyPrice = parseFloat(
+    turf.nightPrice || turf.price || 0
+  );
+}
 
-    // 30 minute slot price
-    totalAmount += hourlyPrice / 2;
+if (isNaN(hourlyPrice)) {
+  hourlyPrice = 0;
+}
+
+// 30 minute slot price
+totalAmount += hourlyPrice / 2;
   }
 }
  {
@@ -809,7 +813,7 @@ app.post(
       });
 
     } catch (err) {
-      console.error("verifypayment error: - server.js:812", err);
+      console.error("verifypayment error: - server.js:816", err);
 
       try {
         if (order_id) {
@@ -829,7 +833,7 @@ app.post(
           }
         }
       } catch (e) {
-        console.log("Failed order update: - server.js:832", e);
+        console.log("Failed order update: - server.js:836", e);
       }
 
       
