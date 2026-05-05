@@ -263,6 +263,7 @@ totalAmount += hourlyPrice / 2;
 
       const finalBookingType =
         bookingType === "full" 
+        
           ? "full"
           : "advance";
 
@@ -812,31 +813,34 @@ app.post(
       });
 
     } catch (err) {
-      console.error("verifypayment error: - server.js:815", err);
+  console.error("verifypayment error: - server.js:816", err);
 
-      try {
-        if (order_id) {
-          const orderRef = db
-            .collection("orders")
-            .doc(order_id);
+  try {
+    if (order_id) {
+      const orderRef = db
+        .collection("orders")
+        .doc(order_id);
 
-          const orderDoc = await orderRef.get();
+      const orderDoc = await orderRef.get();
 
-          if (orderDoc.exists) {
-            await orderRef.update({
-              orderStatus: "failed",
-              paymentStatus: "failed",
-              failedAt:
-                admin.firestore.FieldValue.serverTimestamp(),
-            });
-          }
-        }
-      } catch (e) {
-        console.log("Failed order update: - server.js:835", e);
+      if (orderDoc.exists) {
+        await orderRef.update({
+          orderStatus: "failed",
+          paymentStatus: "failed",
+          failedAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+        });
       }
-
-      
     }
+  } catch (e) {
+    console.log("Failed order update: - server.js:836", e);
+  }
+
+  return res.status(500).json({
+    success: false,
+    error: err.message || "Verification failed",
+  });
+}
   }
 );
 
