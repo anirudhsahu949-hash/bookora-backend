@@ -25,13 +25,21 @@ try {
     credential: admin.credential.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(
+        /\\n/g,
+        "\n"
+      ),
     }),
   });
 
-  console.log("Firebase connected ✅ - server.js:32");
+  console.log(
+    "Firebase connected ✅"
+  );
 } catch (e) {
-  console.error("Firebase init error ❌ - server.js:34", e);
+  console.error(
+    "Firebase init error ❌",
+    e
+  );
 }
 
 const db = admin.firestore();
@@ -57,535 +65,792 @@ const razorpay = new Razorpay({
 });
 
 // =======================================================
-// ✅ CREATE ORDER
+// ✅ HELPERS
 // =======================================================
-app.post("/create-order", async (req, res) => {
-  try {
-    const {
-  turfId,
-  slots,
-  dateString,
-  userId,
-  bookingType,
-} = req.body;
 
-    if (!turfId || !dateString) {
-      return res.status(400).json({
-        error: "turfId and dateString required",
-      });
+function parseHour(slot) {
+  const startPart =
+    slot.split("-")[0].trim();
+
+  const timeParts = startPart.match(
+    /(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i
+  );
+
+  let hour = 0;
+
+  if (timeParts) {
+    hour = parseInt(timeParts[1]);
+
+    const meridiem =
+      timeParts[3].toUpperCase();
+
+    if (
+      meridiem === "PM" &&
+      hour < 12
+    ) {
+      hour += 12;
     }
 
-    if (!Array.isArray(slots) || slots.length === 0) {
-      return res.status(400).json({
-        error: "slots required",
-      });
+    if (
+      meridiem === "AM" &&
+      hour === 12
+    ) {
+      hour = 0;
     }
+  }
 
-    // ===================================================
-    // ✅ Fetch Turf
-    // ===================================================
-    const turfDoc = await db
-      .collection("turfs")
-      .doc(turfId)
-      .get();
-
-    if (!turfDoc.exists) {
-      return res.status(404).json({
-        error: "Turf not found",
-      });
-    }
-
-    const turf = turfDoc.data();
-
-    // ===================================================
-    // ✅ Special Prices
-    // ===================================================
-    const specialSnap = await db
-      .collection("specialPrices")
-      .where("turfId", "==", turfId)
-      .where("date", "==", dateString)
-      .get();
-
-    const specialPrices = specialSnap.docs.map((d) =>
-      d.data()
-    );
-
-    // ===================================================
-    // ✅ Already Booked
-    // ===================================================
-    const bookingSnap = await db
-      .collection("bookings")
-      .where("turfId", "==", turfId)
-      .where("dateString", "==", dateString)
-      .get();
-
-   const bookedSlots = bookingSnap.docs
-  .map((d) => d.data())
-  .filter(
-    (b) => b.status !== "cancelled"
-  )
-  .flatMap((b) => b.selectedSlots || []);
-
-    for (const slot of slots) {
-      if (bookedSlots.includes(slot)) {
-        return res.status(400).json({
-          error: `Slot already booked: ${slot}`,
-        });
-      }
-    }
-
-    // ===================================================
-    // ✅ Calculate Amount
-    // ===================================================
-    let totalAmount = 0;
-
-    for (const slot of slots) {
-      const special = specialPrices.find(
-        (s) =>
-          String(s.slotTime).trim() ===
-          String(slot).trim()
-      );
-
-      if (special) {
-        totalAmount += Number(special.price);
-      } else {
-        const startPart = slot.split("-")[0].trim();
-
-        const timeParts = startPart.match(
-          /(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i
-        );
-
-        let hour = 0;
-
-        if (timeParts) {
-          hour = parseInt(timeParts[1]);
-
-          const meridiem =
-            timeParts[3].toUpperCase();
-
-          if (meridiem === "PM" && hour < 12) {
-            hour += 12;
-          }
-
-          if (meridiem === "AM" && hour === 12) {
-            hour = 0;
-          }
-        }
-
-        if (hour >= 6 && hour < 18) {
-          totalAmount += Number(
-            turf.dayPrice || turf.price || 0
-          );
-        } else {
-          totalAmount += Number(
-            turf.nightPrice || turf.price || 0
-          );
-        }
-      }
-    }
-
-    if (totalAmount <= 0) {
-      return res.status(400).json({
-        error: "Invalid amount",
-      });
-    }
-
-    // ===================================================
-    // ✅ Advance Amount
-    // ===================================================
-    let advanceAmount = 0;
-
-if (bookingType === "full") {
-  advanceAmount = totalAmount;
-} else {
-  advanceAmount =
-    Number(turf.bookingPrice) > 0
-      ? Number(turf.bookingPrice)
-      : totalAmount;
+  return hour;
 }
 
-    // ===================================================
-    // ✅ Create Razorpay Order
-    // ===================================================
-    const order = await razorpay.orders.create({
-      amount: advanceAmount * 100,
-      currency: "INR",
-      receipt: "receipt_" + Date.now(),
-    });
+// =======================================================
+// ✅ CREATE ORDER
+// =======================================================
+app.post(
+  "/create-order",
+  async (req, res) => {
+    try {
+      const {
+        turfId,
+        slots,
+        dateString,
+        userId,
+        bookingType,
+      } = req.body;
 
-    // ===================================================
-    // ✅ Save Order
-    // ===================================================
-   await db.collection("orders").doc(order.id).set({
+      // ===================================================
+      // ✅ Validation
+      // ===================================================
 
-    bookingType:
-  bookingType === "full"
-    ? "full"
-    : "advance",
-    
-  turfId,
+      if (!turfId || !dateString) {
+        return res.status(400).json({
+          error:
+            "turfId and dateString required",
+        });
+      }
 
-  turfName: turf.name || "",
+      if (
+        !Array.isArray(slots) ||
+        slots.length === 0
+      ) {
+        return res.status(400).json({
+          error: "slots required",
+        });
+      }
 
-  turfLocation: turf.location || "",
+      // ===================================================
+      // ✅ Fetch Turf
+      // ===================================================
 
-  image:
-    Array.isArray(turf.images) &&
-    turf.images.length > 0
-      ? turf.images[0]
-      : turf.image || "",
+      const turfDoc = await db
+        .collection("turfs")
+        .doc(turfId)
+        .get();
 
-  ownerId: turf.ownerId || null,
+      if (!turfDoc.exists) {
+        return res.status(404).json({
+          error: "Turf not found",
+        });
+      }
 
-  ownerName: turf.ownerName || "",
+      const turf = turfDoc.data();
 
-  mapLink: turf.mapLink || "",
+      // ===================================================
+      // ✅ Special Prices
+      // ===================================================
 
-  userId: userId || null,
+      const specialSnap = await db
+        .collection("specialPrices")
+        .where("turfId", "==", turfId)
+        .where("date", "==", dateString)
+        .get();
 
-  slots,
+      const specialPrices =
+        specialSnap.docs.map((d) =>
+          d.data()
+        );
 
-  dateString,
+      // ===================================================
+      // ✅ Already Booked
+      // ===================================================
 
-  totalAmount,
+      const bookingSnap = await db
+        .collection("bookings")
+        .where("turfId", "==", turfId)
+        .where(
+          "dateString",
+          "==",
+          dateString
+        )
+        .get();
 
-  advanceAmount,
+      const bookedSlots =
+        bookingSnap.docs
+          .map((d) => d.data())
+          .filter(
+            (b) =>
+              b.status !== "cancelled"
+          )
+          .flatMap(
+            (b) =>
+              b.selectedSlots || []
+          );
 
- remainingAmount:
-  Math.max(
-    totalAmount - advanceAmount,
-    0
-  ),
+      for (const slot of slots) {
+        if (
+          bookedSlots.includes(slot)
+        ) {
+          return res.status(400).json({
+            error: `Slot already booked: ${slot}`,
+          });
+        }
+      }
 
-  orderId: order.id,
+      // ===================================================
+      // ✅ Calculate Total Amount
+      // ===================================================
 
-  orderStatus: "created",
+      let totalAmount = 0;
 
-  paymentStatus: "pending",
+      for (const slot of slots) {
+        const special =
+          specialPrices.find(
+            (s) =>
+              String(
+                s.slotTime
+              ).trim() ===
+              String(slot).trim()
+          );
 
-  createdAt:
-    admin.firestore.FieldValue.serverTimestamp(),
-});
+        if (special) {
+          totalAmount += Number(
+            special.price
+          );
+        } else {
+          const hour =
+            parseHour(slot);
 
-    return res.json({
-      orderId: order.id,
-      amount: order.amount,
-      currency: order.currency,
-      key: process.env.KEY_ID,
-    });
-  } catch (err) {
-    console.error("createorder error: - server.js:277", err);
+          if (
+            hour >= 6 &&
+            hour < 18
+          ) {
+            totalAmount += Number(
+              turf.dayPrice ||
+                turf.price ||
+                0
+            );
+          } else {
+            totalAmount += Number(
+              turf.nightPrice ||
+                turf.price ||
+                0
+            );
+          }
+        }
+      }
 
-    return res.status(500).json({
-      error: err.message,
-    });
+      if (totalAmount <= 0) {
+        return res.status(400).json({
+          error: "Invalid amount",
+        });
+      }
+
+      // ===================================================
+      // ✅ Booking Type
+      // ===================================================
+
+      const finalBookingType =
+        bookingType === "full"
+          ? "full"
+          : "advance";
+
+      // ===================================================
+      // ✅ Advance Amount
+      // ===================================================
+
+      let advanceAmount = 0;
+
+      if (
+        finalBookingType === "full"
+      ) {
+        advanceAmount =
+          totalAmount;
+      } else {
+        advanceAmount = Math.min(
+          Number(
+            turf.bookingPrice || 0
+          ) * slots.length,
+          totalAmount
+        );
+      }
+
+      const remainingAmount =
+        Math.max(
+          totalAmount -
+            advanceAmount,
+          0
+        );
+
+      // ===================================================
+      // ✅ Razorpay Order
+      // ===================================================
+
+      const order =
+        await razorpay.orders.create({
+          amount:
+            advanceAmount * 100,
+          currency: "INR",
+          receipt:
+            "receipt_" +
+            Date.now(),
+        });
+
+      // ===================================================
+      // ✅ Save Order
+      // ===================================================
+
+      await db
+        .collection("orders")
+        .doc(order.id)
+        .set({
+          bookingType:
+            finalBookingType,
+
+          paymentMode:
+            finalBookingType ===
+            "full"
+              ? "full_payment"
+              : "advance_payment",
+
+          turfId,
+
+          turfName:
+            turf.name || "",
+
+          turfLocation:
+            turf.location || "",
+
+          image:
+            Array.isArray(
+              turf.images
+            ) &&
+            turf.images.length > 0
+              ? turf.images[0]
+              : turf.image || "",
+
+          ownerId:
+            turf.ownerId || null,
+
+          ownerName:
+            turf.ownerName || "",
+
+          mapLink:
+            turf.mapLink || "",
+
+          userId:
+            userId || null,
+
+          slots,
+
+          dateString,
+
+          totalAmount,
+
+          paidAmount:
+            advanceAmount,
+
+          advanceAmount,
+
+          remainingAmount,
+
+          orderId: order.id,
+
+          orderStatus:
+            "created",
+
+          paymentStatus:
+            "pending",
+
+          verificationStatus:
+            "pending",
+
+          ownerSettlementStatus:
+            "pending",
+
+          createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+      return res.json({
+        orderId: order.id,
+        amount: order.amount,
+        currency:
+          order.currency,
+        key: process.env.KEY_ID,
+      });
+    } catch (err) {
+      console.error(
+        "createorder error:",
+        err
+      );
+
+      return res.status(500).json({
+        error: err.message,
+      });
+    }
   }
-});
+);
 
 // =======================================================
 // ✅ VERIFY PAYMENT
 // =======================================================
-app.post("/verify-payment", async (req, res) => {
-  try {
-    const { order_id, payment_id, signature } =
-      req.body;
+app.post(
+  "/verify-payment",
+  async (req, res) => {
+    let order_id = null;
 
-    if (!order_id || !payment_id || !signature) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing fields",
+    try {
+      const {
+        order_id: incomingOrderId,
+        payment_id,
+        signature,
+      } = req.body;
+
+      order_id =
+        incomingOrderId;
+
+      // ===================================================
+      // ✅ Validation
+      // ===================================================
+
+      if (
+        !order_id ||
+        !payment_id ||
+        !signature
+      ) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "Missing fields",
+        });
+      }
+
+      // ===================================================
+      // ✅ Verify Signature
+      // ===================================================
+
+      const expectedSignature =
+        crypto
+          .createHmac(
+            "sha256",
+            process.env.KEY_SECRET
+          )
+          .update(
+            order_id +
+              "|" +
+              payment_id
+          )
+          .digest("hex");
+
+      if (
+        expectedSignature !==
+        signature
+      ) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "Invalid signature",
+        });
+      }
+
+      // ===================================================
+      // ✅ Fetch Order
+      // ===================================================
+
+      const orderRef = db
+        .collection("orders")
+        .doc(order_id);
+
+      const orderDoc =
+        await orderRef.get();
+
+      if (!orderDoc.exists) {
+        return res.status(404).json({
+          success: false,
+          error:
+            "Order not found",
+        });
+      }
+
+      const orderData =
+        orderDoc.data();
+
+      // ===================================================
+      // ✅ Already Paid
+      // ===================================================
+
+      if (
+        orderData.orderStatus ===
+        "paid"
+      ) {
+        return res.json({
+          success: true,
+        });
+      }
+
+      // ===================================================
+      // ✅ Verify Razorpay Payment
+      // ===================================================
+
+      const payment =
+        await razorpay.payments.fetch(
+          payment_id
+        );
+
+      if (
+        payment.status !==
+        "captured"
+      ) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "Payment not captured",
+        });
+      }
+
+      // ===================================================
+      // ✅ Fetch User
+      // ===================================================
+
+      let userName = "";
+      let userPhone = "";
+      let userEmail = "";
+
+      if (orderData.userId) {
+        const userDoc = await db
+          .collection("users")
+          .doc(orderData.userId)
+          .get();
+
+        if (userDoc.exists) {
+          const u =
+            userDoc.data();
+
+          userName =
+            u.name || "";
+
+          userPhone =
+            u.phone || "";
+
+          userEmail =
+            u.email || "";
+        }
+      }
+
+      // ===================================================
+      // ✅ Payment Status
+      // ===================================================
+
+      const paymentStatus =
+        orderData.bookingType ===
+        "full"
+          ? "fully_paid"
+          : "advance_paid";
+
+      // ===================================================
+      // ✅ Prevent Double Booking
+      // ===================================================
+
+      const existingBookingSnap =
+        await db
+          .collection(
+            "bookings"
+          )
+          .where(
+            "turfId",
+            "==",
+            orderData.turfId
+          )
+          .where(
+            "dateString",
+            "==",
+            orderData.dateString
+          )
+          .get();
+
+      const existingSlots =
+        existingBookingSnap.docs
+          .map((d) => d.data())
+          .filter(
+            (b) =>
+              b.status !==
+              "cancelled"
+          )
+          .flatMap(
+            (b) =>
+              b.selectedSlots ||
+              []
+          );
+
+      for (const slot of orderData.slots) {
+        if (
+          existingSlots.includes(
+            slot
+          )
+        ) {
+          return res.status(400).json({
+            success: false,
+            error:
+              "Slot already booked during payment",
+          });
+        }
+      }
+
+      // ===================================================
+      // ✅ Booking Date
+      // ===================================================
+
+      const parsedDate =
+        new Date(
+          orderData.dateString
+        );
+
+      const bookingDate =
+        admin.firestore.Timestamp.fromDate(
+          isNaN(
+            parsedDate.getTime()
+          )
+            ? new Date()
+            : parsedDate
+        );
+
+      // ===================================================
+      // ✅ Batch
+      // ===================================================
+
+      const batch = db.batch();
+
+      const bookingId = `${orderData.turfId}_${Date.now()}`;
+
+      const bookingRef = db
+        .collection(
+          "bookings"
+        )
+        .doc(bookingId);
+
+      batch.create(
+        bookingRef,
+        {
+          bookingType:
+            orderData.bookingType ||
+            "advance",
+
+          paymentMode:
+            orderData.paymentMode ||
+            "advance_payment",
+
+          turfId:
+            orderData.turfId,
+
+          turfName:
+            orderData.turfName,
+
+          turfLocation:
+            orderData.turfLocation,
+
+          image:
+            orderData.image,
+
+          ownerId:
+            orderData.ownerId,
+
+          ownerName:
+            orderData.ownerName,
+
+          mapLink:
+            orderData.mapLink,
+
+          userId:
+            orderData.userId ||
+            null,
+
+          userName,
+
+          userPhone,
+
+          userEmail,
+
+          date: bookingDate,
+
+          dateString:
+            orderData.dateString,
+
+          selectedSlots:
+            orderData.slots,
+
+          paymentId:
+            payment_id,
+
+          orderId: order_id,
+
+          totalAmount:
+            orderData.totalAmount,
+
+          paidAmount:
+            orderData.paidAmount,
+
+          advanceAmount:
+            orderData.advanceAmount,
+
+          remainingAmount:
+            orderData.remainingAmount,
+
+          status:
+            "confirmed",
+
+          paymentStatus,
+
+          verificationStatus:
+            "verified",
+
+          ownerSettlementStatus:
+            "pending",
+
+          refundStatus:
+            "not_applicable",
+
+          refundAmount: 0,
+
+          cancelledAt:
+            null,
+
+          cancelledBy:
+            null,
+
+          cancellationReason:
+            null,
+
+          cancellationTimeLeft:
+            null,
+
+          createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+        }
+      );
+
+      // ===================================================
+      // ✅ Update Order
+      // ===================================================
+
+      batch.update(orderRef, {
+        orderStatus: "paid",
+
+        paymentId:
+          payment_id,
+
+        paymentStatus,
+
+        verificationStatus:
+          "verified",
+
+        paidAt:
+          admin.firestore.FieldValue.serverTimestamp(),
       });
-    }
 
-    // ===================================================
-    // ✅ Verify Signature
-    // ===================================================
-    const expectedSignature = crypto
-      .createHmac("sha256", process.env.KEY_SECRET)
-      .update(order_id + "|" + payment_id)
-      .digest("hex");
+      await batch.commit();
 
-    if (expectedSignature !== signature) {
-      return res.status(400).json({
-        success: false,
-        error: "Invalid signature",
-      });
-    }
+      // ===================================================
+      // ✅ Remove Slot Locks
+      // ===================================================
 
-    // ===================================================
-    // ✅ Fetch Order
-    // ===================================================
-    const orderRef = db
-      .collection("orders")
-      .doc(order_id);
+      const lockSnap = await db
+        .collection(
+          "slotLocks"
+        )
+        .where(
+          "turfId",
+          "==",
+          orderData.turfId
+        )
+        .where(
+          "dateString",
+          "==",
+          orderData.dateString
+        )
+        .get();
 
-    const orderDoc = await orderRef.get();
+      const deletePromises = [];
 
-    if (!orderDoc.exists) {
-      return res.status(404).json({
-        success: false,
-        error: "Order not found",
-      });
-    }
+      lockSnap.docs.forEach(
+        (docSnap) => {
+          const data =
+            docSnap.data();
 
-    const orderData = orderDoc.data();
+          if (
+            orderData.slots.includes(
+              data.slotTime
+            )
+          ) {
+            deletePromises.push(
+              docSnap.ref.delete()
+            );
+          }
+        }
+      );
 
-    // ===================================================
-    // ✅ Already Paid
-    // ===================================================
-    if (orderData.orderStatus === "paid") {
+      await Promise.all(
+        deletePromises
+      );
+
       return res.json({
         success: true,
       });
-    }
-
-    // ===================================================
-    // ✅ Verify Payment
-    // ===================================================
-    const payment =
-      await razorpay.payments.fetch(payment_id);
-
-    if (payment.status !== "captured") {
-      return res.status(400).json({
-        success: false,
-        error: "Payment not captured",
-      });
-    }
-
-    // ===================================================
-    // ✅ Fetch Turf
-    // ===================================================
-    const turfDoc = await db
-      .collection("turfs")
-      .doc(orderData.turfId)
-      .get();
-
-    if (!turfDoc.exists) {
-      return res.status(404).json({
-        success: false,
-        error: "Turf not found",
-      });
-    }
-
-    const turfData = turfDoc.data();
-
-    const turfName = turfData.name || "";
-    const ownerId = turfData.ownerId || null;
-
-    // ===================================================
-    // ✅ Fetch User
-    // ===================================================
-    let userName = "";
-    let userPhone = "";
-    let userEmail = "";
-
-    if (orderData.userId) {
-      const userDoc = await db
-        .collection("users")
-        .doc(orderData.userId)
-        .get();
-
-      if (userDoc.exists) {
-        const u = userDoc.data();
-
-        userName = u.name || "";
-        userPhone = u.phone || "";
-        userEmail = u.email || "";
-      }
-    }
-
-    // ===================================================
-    // ✅ Date
-    // ===================================================
-    const parsedDate = new Date(
-      orderData.dateString
-    );
-
-    const bookingDate =
-      admin.firestore.Timestamp.fromDate(
-        isNaN(parsedDate.getTime())
-          ? new Date()
-          : parsedDate
+    } catch (err) {
+      console.error(
+        "verifypayment error:",
+        err
       );
 
-    // ===================================================
-    // ✅ Payment Status
-    // ===================================================
-    const paymentStatus =
-  orderData.bookingType === "full"
-    ? "fully_paid"
-    : "advance_paid";
+      if (order_id) {
+        await db
+          .collection("orders")
+          .doc(order_id)
+          .update({
+            orderStatus:
+              "failed",
 
-        
-        const existingBookingSnap = await db
-  .collection("bookings")
-  .where("turfId", "==", orderData.turfId)
-  .where("dateString", "==", orderData.dateString)
-  .get();
+            paymentStatus:
+              "failed",
 
-const existingSlots = existingBookingSnap.docs
-  .map((d) => d.data())
-  .filter(
-    (b) => b.status !== "cancelled"
-  )
-  .flatMap((b) => b.selectedSlots || []);
-
-for (const slot of orderData.slots) {
-  if (existingSlots.includes(slot)) {
-    return res.status(400).json({
-      success: false,
-      error:
-        "Slot already booked during payment",
-    });
-  }
-}
-
-    // ===================================================
-    // ✅ Batch
-    // ===================================================
-    const batch = db.batch();
-
-const bookingId =
-  `${orderData.turfId}_${Date.now()}`;
-
-const bookingRef = db
-  .collection("bookings")
-  .doc(bookingId);
-
-batch.create(bookingRef, {
-  turfId: orderData.turfId,
-
-  turfName: orderData.turfName,
-
-  turfLocation: orderData.turfLocation,
-
-  image: orderData.image,
-
-  ownerId: orderData.ownerId,
-
-  ownerName: orderData.ownerName,
-
-  mapLink: orderData.mapLink,
-
-  userId: orderData.userId || null,
-
-  userName: userName,
-
-  userPhone: userPhone,
-
-  userEmail: userEmail,
-
-  date: bookingDate,
-
-  dateString: orderData.dateString,
-
-  selectedSlots: orderData.slots,
-
-  paymentId: payment_id,
-
-  orderId: order_id,
-
-  totalAmount: orderData.totalAmount,
-
-  advanceAmount:
-    orderData.advanceAmount,
-
-  remainingAmount:
-    orderData.remainingAmount,
-
-  status: "confirmed",
-
-  paymentStatus: paymentStatus,
-
-  refundStatus: "not_applicable",
-
-  refundAmount: 0,
-
-  cancelledAt: null,
-
-  cancelledBy: null,
-
-  cancellationReason: null,
-
-  cancellationTimeLeft: null,
-
-  bookingType:
-  orderData.bookingType || "advance",
-
-  createdAt:
-    admin.firestore.FieldValue.serverTimestamp(),
-});
-
-    // ===================================================
-    // ✅ Update Order
-    // ===================================================
-    batch.update(orderRef, {
-      orderStatus: "paid",
-      paymentId: payment_id,
-
-      paidAt:
-        admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    await batch.commit();
-
-    // ===================================================
-    // ✅ Remove Slot Locks
-    // ===================================================
-    const lockSnap = await db
-      .collection("slotLocks")
-      .where("turfId", "==", orderData.turfId)
-      .where("dateString", "==", orderData.dateString)
-      .get();
-
-    const deletePromises = [];
-
-    lockSnap.docs.forEach((docSnap) => {
-      const data = docSnap.data();
-
-      if (orderData.slots.includes(data.slotTime)) {
-        deletePromises.push(docSnap.ref.delete());
+            failedAt:
+              admin.firestore.FieldValue.serverTimestamp(),
+          });
       }
-    });
 
-    await Promise.all(deletePromises);
-
-    return res.json({
-      success: true,
-    });
-  } catch (err) {
-    console.error("verifypayment error: - server.js:557", err);
-
-    if (order_id) {
-  await db
-    .collection("orders")
-    .doc(order_id)
-    .update({
-      orderStatus: "failed",
-      failedAt:
-        admin.firestore.FieldValue.serverTimestamp(),
-    });
-}
-
-    return res.status(500).json({
-      success: false,
-      error: err.message,
-    });
+      return res.status(500).json({
+        success: false,
+        error: err.message,
+      });
+    }
   }
-});
+);
 
 // =======================================================
 // ✅ HEALTH CHECK
 // =======================================================
 app.get("/", (req, res) => {
-  res.send("Bookora server running ✅");
+  res.send(
+    "Bookora server running ✅"
+  );
 });
 
 // =======================================================
 // 🚀 START SERVER
 // =======================================================
-const PORT = process.env.PORT || 5000;
+const PORT =
+  process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:590`);
+  console.log(
+    `Server running on ${PORT} ✅`
+  );
 });
