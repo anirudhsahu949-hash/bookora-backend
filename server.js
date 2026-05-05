@@ -61,7 +61,13 @@ const razorpay = new Razorpay({
 // =======================================================
 app.post("/create-order", async (req, res) => {
   try {
-    const { turfId, slots, dateString, userId } = req.body;
+    const {
+  turfId,
+  slots,
+  dateString,
+  userId,
+  bookingType,
+} = req.body;
 
     if (!turfId || !dateString) {
       return res.status(400).json({
@@ -187,10 +193,16 @@ app.post("/create-order", async (req, res) => {
     // ===================================================
     // ✅ Advance Amount
     // ===================================================
-    const advanceAmount =
-      Number(turf.bookingPrice) > 0
-        ? Number(turf.bookingPrice)
-        : totalAmount;
+    let advanceAmount = 0;
+
+if (bookingType === "full") {
+  advanceAmount = totalAmount;
+} else {
+  advanceAmount =
+    Number(turf.bookingPrice) > 0
+      ? Number(turf.bookingPrice)
+      : totalAmount;
+}
 
     // ===================================================
     // ✅ Create Razorpay Order
@@ -205,6 +217,12 @@ app.post("/create-order", async (req, res) => {
     // ✅ Save Order
     // ===================================================
    await db.collection("orders").doc(order.id).set({
+
+    bookingType:
+  bookingType === "full"
+    ? "full"
+    : "advance",
+    
   turfId,
 
   turfName: turf.name || "",
@@ -233,8 +251,11 @@ app.post("/create-order", async (req, res) => {
 
   advanceAmount,
 
-  remainingAmount:
+ remainingAmount:
+  Math.max(
     totalAmount - advanceAmount,
+    0
+  ),
 
   orderId: order.id,
 
@@ -253,7 +274,7 @@ app.post("/create-order", async (req, res) => {
       key: process.env.KEY_ID,
     });
   } catch (err) {
-    console.error("createorder error: - server.js:256", err);
+    console.error("createorder error: - server.js:277", err);
 
     return res.status(500).json({
       error: err.message,
@@ -391,10 +412,9 @@ app.post("/verify-payment", async (req, res) => {
     // ✅ Payment Status
     // ===================================================
     const paymentStatus =
-      orderData.advanceAmount >=
-      orderData.totalAmount
-        ? "full"
-        : "partial";
+  orderData.bookingType === "full"
+    ? "fully_paid"
+    : "advance_paid";
 
         
         const existingBookingSnap = await db
@@ -489,6 +509,9 @@ batch.create(bookingRef, {
 
   cancellationTimeLeft: null,
 
+  bookingType:
+  orderData.bookingType || "advance",
+
   createdAt:
     admin.firestore.FieldValue.serverTimestamp(),
 });
@@ -531,7 +554,7 @@ batch.create(bookingRef, {
       success: true,
     });
   } catch (err) {
-    console.error("verifypayment error: - server.js:534", err);
+    console.error("verifypayment error: - server.js:557", err);
 
     if (order_id) {
   await db
@@ -564,5 +587,5 @@ app.get("/", (req, res) => {
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:567`);
+  console.log(`Server running on ${PORT} ✅ - server.js:590`);
 });
