@@ -198,6 +198,9 @@ app.post(
           // ===================================================
 // ✅ Calculate Total Amount
 // ===================================================
+// ===================================================
+// ✅ Prevent Already Booked Slots
+// ===================================================
 
 for (const slot of slots) {
   if (
@@ -208,7 +211,12 @@ for (const slot of slots) {
     return res.status(400).json({
       error: `Slot already booked: ${slot}`,
     });
+  }
+}
 
+// ===================================================
+// ✅ Calculate Total Amount
+// ===================================================
 
 let totalAmount = 0;
 
@@ -240,37 +248,7 @@ for (const slot of slots) {
     totalAmount += hourlyPrice / 2;
   }
 }
-
-         for (const slot of slots) {
-  const special = specialPrices.find(
-    (s) =>
-      String(s.slotTime).trim() ===
-      String(slot).trim()
-  );
-
-  if (special) {
-    totalAmount += Number(special.price);
-  } else {
-    const hour = parseHour(slot);
-
-    let hourlyPrice = 0;
-
-    if (hour >= 6 && hour < 18) {
-      hourlyPrice = Number(
-        turf.dayPrice || turf.price || 0
-      );
-    } else {
-      hourlyPrice = Number(
-        turf.nightPrice || turf.price || 0
-      );
-    }
-
-    // 30 MINUTE SLOT PRICE
-    totalAmount += hourlyPrice / 2;
-  }
-}
-
-      if (totalAmount <= 0) {
+ {
         return res.status(400).json({
           error: "Invalid amount",
         });
@@ -831,7 +809,7 @@ app.post(
       });
 
     } catch (err) {
-      console.error("verifypayment error: - server.js:834", err);
+      console.error("verifypayment error: - server.js:812", err);
 
       try {
         if (order_id) {
@@ -851,13 +829,10 @@ app.post(
           }
         }
       } catch (e) {
-        console.log("Failed order update: - server.js:854", e);
+        console.log("Failed order update: - server.js:832", e);
       }
 
-      return res.status(500).json({
-        success: false,
-        error: err.message,
-      });
+      
     }
   }
 );
