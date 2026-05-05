@@ -195,58 +195,80 @@ app.post(
               b.selectedSlots || []
           );
 
-      for (const slot of slots) {
-        if (
-          bookedSlots.includes(slot)
-        ) {
-          return res.status(400).json({
-            error: `Slot already booked: ${slot}`,
-          });
-        }
-      }
+          // ===================================================
+// ✅ Calculate Total Amount
+// ===================================================
 
-      // ===================================================
-      // ✅ Calculate Total Amount
-      // ===================================================
+for (const slot of slots) {
+  if (
+    bookedSlots
+      .map((s) => String(s).trim())
+      .includes(String(slot).trim())
+  ) {
+    return res.status(400).json({
+      error: `Slot already booked: ${slot}`,
+    });
 
-      let totalAmount = 0;
 
-      for (const slot of slots) {
-        const special =
-          specialPrices.find(
-            (s) =>
-              String(
-                s.slotTime
-              ).trim() ===
-              String(slot).trim()
-          );
+let totalAmount = 0;
 
-        if (special) {
-          totalAmount += Number(
-            special.price
-          );
-        } else {
-          const hour =
-            parseHour(slot);
+for (const slot of slots) {
+  const special = specialPrices.find(
+    (s) =>
+      String(s.slotTime).trim() ===
+      String(slot).trim()
+  );
 
-          if (
-            hour >= 6 &&
-            hour < 18
-          ) {
-            totalAmount += Number(
-              turf.dayPrice ||
-                turf.price ||
-                0
-            );
-          } else {
-            totalAmount += Number(
-              turf.nightPrice ||
-                turf.price ||
-                0
-            );
-          }
-        }
-      }
+  if (special) {
+    totalAmount += Number(special.price);
+  } else {
+    const hour = parseHour(slot);
+
+    let hourlyPrice = 0;
+
+    if (hour >= 6 && hour < 18) {
+      hourlyPrice = Number(
+        turf.dayPrice || turf.price || 0
+      );
+    } else {
+      hourlyPrice = Number(
+        turf.nightPrice || turf.price || 0
+      );
+    }
+
+    // 30 minute slot price
+    totalAmount += hourlyPrice / 2;
+  }
+}
+
+         for (const slot of slots) {
+  const special = specialPrices.find(
+    (s) =>
+      String(s.slotTime).trim() ===
+      String(slot).trim()
+  );
+
+  if (special) {
+    totalAmount += Number(special.price);
+  } else {
+    const hour = parseHour(slot);
+
+    let hourlyPrice = 0;
+
+    if (hour >= 6 && hour < 18) {
+      hourlyPrice = Number(
+        turf.dayPrice || turf.price || 0
+      );
+    } else {
+      hourlyPrice = Number(
+        turf.nightPrice || turf.price || 0
+      );
+    }
+
+    // 30 MINUTE SLOT PRICE
+    totalAmount += hourlyPrice / 2;
+  }
+}
 
       if (totalAmount <= 0) {
         return res.status(400).json({
@@ -637,9 +659,8 @@ app.post(
         )
         .doc(bookingId);
 
-      batch.create(
-        bookingRef,
-        {
+      batch.set(bookingRef, {
+
           bookingType:
             orderData.bookingType ||
             "advance",
@@ -772,10 +793,16 @@ app.post(
           orderData.turfId
         )
         .where(
-          "dateString",
-          "==",
-          orderData.dateString
-        )
+  "dateString",
+  "==",
+  orderData.dateString
+)
+.where(
+  "userId",
+  "==",
+  orderData.userId
+)
+        
         .get();
 
       const deletePromises = [];
@@ -797,33 +824,34 @@ app.post(
         }
       );
 
-      await Promise.all(
-        deletePromises
-      );
+           await Promise.all(deletePromises);
 
       return res.json({
         success: true,
       });
+
     } catch (err) {
-      console.error(
-        "verifypayment error:",
-        err
-      );
+      console.error("verifypayment error: - server.js:834", err);
 
-      if (order_id) {
-        await db
-          .collection("orders")
-          .doc(order_id)
-          .update({
-            orderStatus:
-              "failed",
+      try {
+        if (order_id) {
+          const orderRef = db
+            .collection("orders")
+            .doc(order_id);
 
-            paymentStatus:
-              "failed",
+          const orderDoc = await orderRef.get();
 
-            failedAt:
-              admin.firestore.FieldValue.serverTimestamp(),
-          });
+          if (orderDoc.exists) {
+            await orderRef.update({
+              orderStatus: "failed",
+              paymentStatus: "failed",
+              failedAt:
+                admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+        }
+      } catch (e) {
+        console.log("Failed order update: - server.js:854", e);
       }
 
       return res.status(500).json({
