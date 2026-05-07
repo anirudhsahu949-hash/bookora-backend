@@ -859,6 +859,18 @@ app.get("/", (req, res) => {
 const PORT =
   process.env.PORT || 5000;
 
+  // =======================================================
+// ❌ GLOBAL ERROR HANDLER
+// =======================================================
+app.use((err, req, res, next) => {
+  console.error("Global Error: - server.js:866", err);
+
+  res.status(500).json({
+    success: false,
+    error: "Internal server error",
+  });
+});
+
 app.listen(PORT, () => {
   console.log(
     `Server running on ${PORT} ✅`
