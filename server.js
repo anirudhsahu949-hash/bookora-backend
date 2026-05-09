@@ -1132,6 +1132,23 @@ app.post("/create-owner", async (req, res) => {
   }
 });
 
+app.post("/create-operator", async (req, res) => {
+  try {
+    const { name, email, phone, password, ownerId } = req.body;
+    const userRecord = await admin.auth().createUser({ email, password, displayName: name });
+    await db.collection("users").doc(userRecord.uid).set({
+      name, email, phone,
+      role: "turf-operator",
+      ownerId: ownerId || null,
+      status: "active",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    res.json({ success: true, uid: userRecord.uid });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
 app.delete("/delete-owner/:uid", async (req, res) => {
   try {
     const { uid } = req.params;
@@ -1166,7 +1183,7 @@ const PORT =
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1169", err);
+  console.error("Global Error: - server.js:1186", err);
 
   res.status(500).json({
     success: false,
