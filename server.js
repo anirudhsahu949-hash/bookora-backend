@@ -1106,21 +1106,19 @@ app.post("/create-owner", async (req, res) => {
   try {
     const { name, email, phone, password, businessName, location, description } = req.body;
     
-    // Create Firebase Auth account
     const userRecord = await admin.auth().createUser({ 
       email, 
       password, 
       displayName: name 
     });
     
-    // Save to Firestore
     await db.collection("users").doc(userRecord.uid).set({
       name,
       email,
       phone,
       businessName,
-      location,
-      description,
+      location: location || "",
+      description: description || "",   // ← fix: fallback to empty string
       role: "owner",
       status: "active",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -1137,7 +1135,9 @@ app.post("/create-operator", async (req, res) => {
     const { name, email, phone, password, ownerId } = req.body;
     const userRecord = await admin.auth().createUser({ email, password, displayName: name });
     await db.collection("users").doc(userRecord.uid).set({
-      name, email, phone,
+      name,
+      email,
+      phone: phone || "",        // ← fallback
       role: "turf-operator",
       ownerId: ownerId || null,
       status: "active",
