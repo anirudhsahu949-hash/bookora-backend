@@ -6,6 +6,93 @@ const admin = require("firebase-admin");
 require("dotenv").config();
 
 // =======================================================
+// 🚦 RATE LIMITING
+// Run: npm install express-rate-limit
+// =======================================================
+const rateLimit = require("express-rate-limit");
+
+const rateLimitHandler = (req, res) => {
+  res.status(429).json({
+    success: false,
+    error: "Too many requests. Please wait a moment and try again.",
+  });
+};
+
+// /create-order — creates real Razorpay orders (10 per 10 min per IP)
+const orderLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler,
+});
+
+// /verify-payment — writes booking to Firestore (20 per 10 min per IP)
+const verifyLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler,
+});
+
+// /cancel-booking — triggers Razorpay refunds (5 per 10 min per IP)
+const cancelLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler,
+});
+
+// /refund-status — calls Razorpay API (30 per 10 min per IP)
+const refundStatusLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler,
+});
+
+// /create-owner, /create-operator, /delete-owner — account ops (10 per hour per IP)
+const adminActionLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler,
+});
+
+// =======================================================
+// 🔔 PUSH NOTIFICATIONS
+// =======================================================
+const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
+
+async function sendPushToUser(userId, title, body, data = {}) {
+  try {
+    if (!userId) return;
+    const userDoc = await db.collection("users").doc(userId).get();
+    if (!userDoc.exists) return;
+    const token = userDoc.data()?.expoPushToken;
+    if (!token || !token.startsWith("ExponentPushToken[")) return;
+    await fetch(EXPO_PUSH_URL, {
+      method: "POST",
+      headers: { "Accept": "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        to: token, sound: "default",
+        title, body, data,
+        channelId: "bookora-default",
+        priority: "high",
+      }),
+    });
+    console.log(`Push sent ✅ to ${userId} - server.js:88`);
+  } catch (e) {
+    console.error("sendPushToUser failed (nonfatal): - server.js:90", e.message);
+  }
+}
+
+
+// =======================================================
 // 🔥 Firebase Admin Init
 // =======================================================
 const requiredEnv = [
@@ -102,12 +189,12 @@ function parseHour(slot) {
   return hour;
 }
 
+
+
 // =======================================================
 // ✅ CREATE ORDER
 // =======================================================
-app.post(
-  "/create-order",
-  async (req, res) => {
+app.post("/create-order", orderLimiter, async (req, res) => {
     try {
       const {
         turfId,
@@ -407,9 +494,7 @@ totalAmount += hourlyPrice / 2;
 // =======================================================
 // ✅ VERIFY PAYMENT
 // =======================================================
-app.post(
-  "/verify-payment",
-  async (req, res) => {
+app.post("/verify-payment", verifyLimiter, async (req, res) => {
     let order_id = null;
 
     try {
@@ -806,14 +891,32 @@ app.post(
         }
       );
 
-           await Promise.all(deletePromises);
+       
+      await Promise.all(deletePromises);
+
+      // 🔔 Notify user — booking confirmed
+      sendPushToUser(
+        orderData.userId,
+        "🎉 Booking Confirmed!",
+        `Your slot at ${orderData.turfName} on ${orderData.dateString} is confirmed. See you there!`,
+        { screen: "bookings", bookingId }
+      );
+      // 🔔 Notify owner — new booking received
+      if (orderData.ownerId) {
+        sendPushToUser(
+          orderData.ownerId,
+          "📅 New Booking",
+          `${userName || "A user"} booked ${orderData.slots?.length || 1} slot(s) at ${orderData.turfName} on ${orderData.dateString}.`,
+          { screen: "owner-bookings", bookingId }
+        );
+      }
 
       return res.json({
         success: true,
       });
 
     } catch (err) {
-  console.error("verifypayment error: - server.js:816", err);
+  console.error("verifypayment error: - server.js:919", err);
 
   try {
     if (order_id) {
@@ -833,7 +936,7 @@ app.post(
       }
     }
   } catch (e) {
-    console.log("Failed order update: - server.js:836", e);
+    console.log("Failed order update: - server.js:939", e);
   }
 
   return res.status(500).json({
@@ -845,7 +948,7 @@ app.post(
 );
 
 // =======================================================
-app.post("/cancel-booking", async (req, res) => {
+app.post("/cancel-booking",cancelLimiter, async (req, res) => {
   try {
     const { bookingId, userId, reason } = req.body;
  
@@ -1007,11 +1110,11 @@ app.post("/cancel-booking", async (req, res) => {
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
  
-        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1010`);
+        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1113`);
       } catch (refundError) {
         // Refund failed — log it but don't fail the cancellation
         // The booking is still cancelled; refund will need manual processing
-        console.error("Razorpay refund error: - server.js:1014", refundError.message);
+        console.error("Razorpay refund error: - server.js:1117", refundError.message);
  
         await bookingRef.update({
           refundStatus:      "failed",
@@ -1021,6 +1124,25 @@ app.post("/cancel-booking", async (req, res) => {
  
         refundNote = "refund_failed";
       }
+    }
+
+    // 🔔 Notify user — booking cancelled
+    sendPushToUser(
+      userId,
+      "❌ Booking Cancelled",
+      wasOnlinePayment && refundAmount > 0
+        ? `Your booking at ${booking.turfName} was cancelled. ₹${refundAmount} refund initiated (5–7 business days).`
+        : `Your booking at ${booking.turfName} on ${booking.dateString} has been cancelled.`,
+      { screen: "bookings", bookingId }
+    );
+    // 🔔 Notify owner — their booking was cancelled
+    if (booking.ownerId) {
+      sendPushToUser(
+        booking.ownerId,
+        "🔔 Booking Cancelled",
+        `${booking.userName || "A user"} cancelled their slot at ${booking.turfName} on ${booking.dateString}.`,
+        { screen: "owner-bookings" }
+      );
     }
  
     // ── Success response ──────────────────────────────────────────────────────
@@ -1037,7 +1159,7 @@ app.post("/cancel-booking", async (req, res) => {
     });
  
   } catch (err) {
-    console.error("cancelbooking error: - server.js:1040", err);
+    console.error("cancelbooking error: - server.js:1162", err);
     return res.status(500).json({
       success: false,
       error: err.message || "Cancellation failed. Please try again.",
@@ -1052,7 +1174,7 @@ app.post("/cancel-booking", async (req, res) => {
 // Optional endpoint — lets the app check if a refund went through
 // Call: GET /refund-status/:bookingId
  
-app.get("/refund-status/:bookingId", async (req, res) => {
+app.get("/refund-status/:bookingId",refundStatusLimiter, async (req, res) => {
   try {
     const { bookingId } = req.params;
     const { userId }    = req.query;
@@ -1097,12 +1219,12 @@ app.get("/refund-status/:bookingId", async (req, res) => {
     });
  
   } catch (err) {
-    console.error("refundstatus error: - server.js:1100", err);
+    console.error("refundstatus error: - server.js:1222", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post("/create-owner", async (req, res) => {
+app.post("/create-owner",adminActionLimiter, async (req, res) => {
   try {
     const { name, email, phone, password, businessName, location, description } = req.body;
     
@@ -1130,7 +1252,7 @@ app.post("/create-owner", async (req, res) => {
   }
 });
 
-app.post("/create-operator", async (req, res) => {
+app.post("/create-operator",adminActionLimiter, async (req, res) => {
   try {
     const { name, email, phone, password, ownerId } = req.body;
     const userRecord = await admin.auth().createUser({ email, password, displayName: name });
@@ -1149,7 +1271,7 @@ app.post("/create-operator", async (req, res) => {
   }
 });
 
-app.delete("/delete-owner/:uid", async (req, res) => {
+app.delete("/delete-owner/:uid", adminActionLimiter, async (req, res) => {
   try {
     const { uid } = req.params;
     
@@ -1165,8 +1287,56 @@ app.delete("/delete-owner/:uid", async (req, res) => {
   }
 });
 // =======================================================
+
+
+
+
 // ✅ HEALTH CHECK
 // =======================================================
+// =======================================================
+// 📅 DAY-BEFORE REMINDER — call daily at 9 AM via cron-job.org (free)
+// POST /send-reminders  with header  x-cron-secret: <your secret>
+// Add to .env:  CRON_SECRET=some_long_random_string
+// =======================================================
+app.post("/send-reminders", async (req, res) => {
+  if (!process.env.CRON_SECRET || req.headers["x-cron-secret"] !== process.env.CRON_SECRET) {
+    return res.status(401).json({ success: false, error: "Unauthorized" });
+  }
+  try {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toDateString();
+
+    const snap = await db.collection("bookings").where("status", "==", "confirmed").get();
+    const tomorrowBookings = snap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .filter((b) => {
+        const d = b.date?.toDate ? b.date.toDate() : new Date(b.dateString);
+        return !isNaN(d.getTime()) && d.toDateString() === tomorrowStr;
+      });
+
+    let sent = 0;
+    await Promise.allSettled(
+      tomorrowBookings.map(async (b) => {
+        if (!b.userId) return;
+        const slots = (b.selectedSlots || []).slice(0, 2).join(", ");
+        await sendPushToUser(
+          b.userId,
+          "⏰ Reminder: Booking Tomorrow",
+          `You have a slot at ${b.turfName || "your turf"} tomorrow. Slots: ${slots || "check the app"}.`,
+          { screen: "bookings", bookingId: b.id }
+        );
+        sent++;
+      })
+    );
+    return res.json({ success: true, sent, total: tomorrowBookings.length });
+  } catch (e) {
+    console.error("sendreminders error: - server.js:1334", e);
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+
 app.get("/", (req, res) => {
   res.send(
     "Bookora server running ✅"
@@ -1183,7 +1353,7 @@ const PORT =
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1186", err);
+  console.error("Global Error: - server.js:1356", err);
 
   res.status(500).json({
     success: false,
