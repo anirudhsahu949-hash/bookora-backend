@@ -1336,6 +1336,96 @@ app.post("/send-reminders", async (req, res) => {
   }
 });
 
+// =======================================================
+// 📢 ADMIN SEND NOTIFICATION
+// =======================================================
+app.post("/send-admin-notification", async (req, res) => {
+  try {
+    const {
+      title,
+      body,
+      userId,
+      role,
+      image,
+      data,
+    } = req.body;
+
+    // ===================================================
+    // ✅ Send to Single User
+    // ===================================================
+
+    if (userId) {
+      await sendPushToUser(
+        userId,
+        title || "Notification",
+        body || "",
+        data || {}
+      );
+
+      return res.json({
+        success: true,
+        message: "Notification sent to user",
+      });
+    }
+
+    // ===================================================
+    // ✅ Send by Role
+    // role = user / owner / turf-operator
+    // ===================================================
+
+    let query = db.collection("users");
+
+    if (role) {
+      query = query.where("role", "==", role);
+    }
+
+    const snap = await query.get();
+
+    let total = 0;
+
+    await Promise.allSettled(
+      snap.docs.map(async (doc) => {
+        const u = doc.data();
+
+        if (!u.expoPushToken) return;
+
+        await fetch(EXPO_PUSH_URL, {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            to: u.expoPushToken,
+            sound: "default",
+            title: title || "Notification",
+            body: body || "",
+            data: data || {},
+            channelId: "bookora-default",
+            priority: "high",
+          }),
+        });
+
+        total++;
+      })
+    );
+
+    return res.json({
+      success: true,
+      total,
+      message: "Notifications sent",
+    });
+
+  } catch (e) {
+    console.error("admin notification error: - server.js:1420", e);
+
+    return res.status(500).json({
+      success: false,
+      error: e.message,
+    });
+  }
+});
+
 
 app.get("/", (req, res) => {
   res.send(
@@ -1353,7 +1443,7 @@ const PORT =
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1356", err);
+  console.error("Global Error: - server.js:1446", err);
 
   res.status(500).json({
     success: false,
