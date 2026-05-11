@@ -108,8 +108,7 @@ for (const key of requiredEnv) {
 }
 
 try {
-  admin.initializeApp({
-    credential: admin.credential.cert({
+  admin.initializeApp({    credential: admin.credential.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
       privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(
@@ -364,14 +363,12 @@ totalAmount += hourlyPrice / 2;
   advanceAmount = Number(totalAmount);
 } else {
   // Advance payment only
-  const perSlotAdvance = Number(turf.bookingPrice || 0);
+advanceAmount = Number(turf.bookingPrice || 0);
 
-  advanceAmount = perSlotAdvance * slots.length;
-
-  // Safety check
-  if (advanceAmount > totalAmount) {
-    advanceAmount = totalAmount;
-  }
+// Safety check
+if (advanceAmount > totalAmount) {
+  advanceAmount = totalAmount;
+}
 }
 
       const remainingAmount =
@@ -384,9 +381,9 @@ totalAmount += hourlyPrice / 2;
       // ===================================================
       // ✅ Razorpay Order
       // ===================================================
-      console.log("Booking Type: - server.js:387", finalBookingType);
-console.log("Total Amount: - server.js:388", totalAmount);
-console.log("Advance Amount: - server.js:389", advanceAmount);     
+      console.log("Booking Type: - server.js:384", finalBookingType);
+console.log("Total Amount: - server.js:385", totalAmount);
+console.log("Advance Amount: - server.js:386", advanceAmount);     
       
       const order =
         await razorpay.orders.create({
@@ -919,7 +916,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
       });
 
     } catch (err) {
-  console.error("verifypayment error: - server.js:922", err);
+  console.error("verifypayment error: - server.js:919", err);
 
   try {
     if (order_id) {
@@ -939,7 +936,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
       }
     }
   } catch (e) {
-    console.log("Failed order update: - server.js:942", e);
+    console.log("Failed order update: - server.js:939", e);
   }
 
   return res.status(500).json({
@@ -1113,11 +1110,11 @@ app.post("/cancel-booking",cancelLimiter, async (req, res) => {
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
  
-        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1116`);
+        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1113`);
       } catch (refundError) {
         // Refund failed — log it but don't fail the cancellation
         // The booking is still cancelled; refund will need manual processing
-        console.error("Razorpay refund error: - server.js:1120", refundError.message);
+        console.error("Razorpay refund error: - server.js:1117", refundError.message);
  
         await bookingRef.update({
           refundStatus:      "failed",
@@ -1162,7 +1159,7 @@ app.post("/cancel-booking",cancelLimiter, async (req, res) => {
     });
  
   } catch (err) {
-    console.error("cancelbooking error: - server.js:1165", err);
+    console.error("cancelbooking error: - server.js:1162", err);
     return res.status(500).json({
       success: false,
       error: err.message || "Cancellation failed. Please try again.",
@@ -1222,7 +1219,7 @@ app.get("/refund-status/:bookingId",refundStatusLimiter, async (req, res) => {
     });
  
   } catch (err) {
-    console.error("refundstatus error: - server.js:1225", err);
+    console.error("refundstatus error: - server.js:1222", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1334,7 +1331,7 @@ app.post("/send-reminders", async (req, res) => {
     );
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1337", e);
+    console.error("sendreminders error: - server.js:1334", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1420,7 +1417,7 @@ app.post("/send-admin-notification", async (req, res) => {
     });
 
   } catch (e) {
-    console.error("admin notification error: - server.js:1423", e);
+    console.error("admin notification error: - server.js:1420", e);
 
     return res.status(500).json({
       success: false,
@@ -1446,7 +1443,7 @@ const PORT =
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1449", err);
+  console.error("Global Error: - server.js:1446", err);
 
   res.status(500).json({
     success: false,
