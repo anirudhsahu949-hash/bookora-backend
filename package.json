@@ -1,24 +1,32 @@
 {
   "name": "razorpay-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "��#\u0000 \u0000b\u0000o\u0000o\u0000k\u0000o\u0000r\u0000a\u0000-\u0000b\u0000a\u0000c\u0000k\u0000e\u0000n\u0000d\u0000\r\u0000 \u0000#\u0000 \u0000b\u0000o\u0000o\u0000k\u0000o\u0000r\u0000a\u0000-\u0000b\u0000a\u0000c\u0000k\u0000e\u0000n\u0000d\u0000\r\u0000 \u0000",
+  "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anirudhsahu949-hash/bookora-backend.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/anirudhsahu949-hash/bookora-backend/issues"
+  },
+  "homepage": "https://github.com/anirudhsahu949-hash/bookora-backend#readme",
   "dependencies": {
+    "axios": "^1.16.0",
     "body-parser": "^2.2.2",
     "cors": "^2.8.6",
-    "crypto": "^1.0.1",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "express-rate-limit": "^8.5.1",
-    "firebase-admin": "^13.8.0",
+    "firebase-admin": "^13.9.0",
+    "nodemon": "^3.1.14",
     "razorpay": "^2.9.6"
   }
 }
