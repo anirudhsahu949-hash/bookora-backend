@@ -991,16 +991,23 @@ app.post("/cancel-booking",cancelLimiter, async (req, res) => {
     }
  
     // ── Past booking check ────────────────────────────────────────────────────
-    const bookingDate = booking.date?.toDate
-      ? booking.date.toDate()
-      : new Date(booking.dateString);
- 
-    if (bookingDate < new Date()) {
-      return res.status(400).json({
-        success: false,
-        error: "Cannot cancel a booking that has already passed",
-      });
-    }
+   // ── Past booking check (date-only, not timestamp) ─────────────────────────
+const bookingDate = booking.date?.toDate
+  ? booking.date.toDate()
+  : new Date(booking.dateString);
+
+const bookingDay = new Date(bookingDate);
+bookingDay.setHours(0, 0, 0, 0);
+
+const today = new Date();
+today.setHours(0, 0, 0, 0);
+
+if (bookingDay < today) {
+  return res.status(400).json({
+    success: false,
+    error: "Cannot cancel a booking that has already passed",
+  });
+}
  
     // ── Cancellation window check (2 hours before slot start) ─────────────────
     // Parse the first selected slot to get the start hour
@@ -1110,11 +1117,11 @@ app.post("/cancel-booking",cancelLimiter, async (req, res) => {
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
  
-        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1113`);
+        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1120`);
       } catch (refundError) {
         // Refund failed — log it but don't fail the cancellation
         // The booking is still cancelled; refund will need manual processing
-        console.error("Razorpay refund error: - server.js:1117", refundError.message);
+        console.error("Razorpay refund error: - server.js:1124", refundError.message);
  
         await bookingRef.update({
           refundStatus:      "failed",
@@ -1159,7 +1166,7 @@ app.post("/cancel-booking",cancelLimiter, async (req, res) => {
     });
  
   } catch (err) {
-    console.error("cancelbooking error: - server.js:1162", err);
+    console.error("cancelbooking error: - server.js:1169", err);
     return res.status(500).json({
       success: false,
       error: err.message || "Cancellation failed. Please try again.",
@@ -1219,7 +1226,7 @@ app.get("/refund-status/:bookingId",refundStatusLimiter, async (req, res) => {
     });
  
   } catch (err) {
-    console.error("refundstatus error: - server.js:1222", err);
+    console.error("refundstatus error: - server.js:1229", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1274,15 +1281,49 @@ app.post("/create-operator",adminActionLimiter, async (req, res) => {
 app.delete("/delete-owner/:uid", adminActionLimiter, async (req, res) => {
   try {
     const { uid } = req.params;
-    
-    // Delete Firebase Auth account
+
+    if (!uid) {
+      return res.status(400).json({ success: false, error: "uid is required" });
+    }
+
+    // 1. Deactivate all turfs belonging to this owner
+    const turfSnap = await db.collection("turfs").where("ownerId", "==", uid).get();
+    if (!turfSnap.empty) {
+      const batch = db.batch();
+      turfSnap.docs.forEach((d) => {
+        batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" });
+      });
+      await batch.commit();
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1297`);
+    }
+
+    // 2. Unlink any operators who belonged to this owner
+    const operatorSnap = await db.collection("users")
+      .where("role", "==", "turf-operator")
+      .where("ownerId", "==", uid)
+      .get();
+    if (!operatorSnap.empty) {
+      const batch = db.batch();
+      operatorSnap.docs.forEach((d) => {
+        batch.update(d.ref, { ownerId: null, status: "inactive" });
+      });
+      await batch.commit();
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1311`);
+    }
+
+    // 3. Delete Firebase Auth account
     await admin.auth().deleteUser(uid);
-    
-    // Delete Firestore doc
+
+    // 4. Delete Firestore user doc
     await db.collection("users").doc(uid).delete();
 
-    res.json({ success: true });
+    res.json({
+      success: true,
+      turfsDeactivated: turfSnap.size,
+      operatorsUnlinked: operatorSnap.size,
+    });
   } catch (e) {
+    console.error("deleteowner error: - server.js:1326", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1331,7 +1372,7 @@ app.post("/send-reminders", async (req, res) => {
     );
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1334", e);
+    console.error("sendreminders error: - server.js:1375", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1340,89 +1381,61 @@ app.post("/send-reminders", async (req, res) => {
 // 📢 ADMIN SEND NOTIFICATION
 // =======================================================
 app.post("/send-admin-notification", async (req, res) => {
+  // ── Admin secret check ───────────────────────────────────────────────────
+  const secret = req.headers["x-admin-secret"];
+  if (!secret || secret !== process.env.ADMIN_SECRET) {
+    return res.status(401).json({ success: false, error: "Unauthorized" });
+  }
+
   try {
-    const {
-      title,
-      body,
-      userId,
-      role,
-      image,
-      data,
-    } = req.body;
+    const { title, body, userId, role, image, data } = req.body;
 
-    // ===================================================
-    // ✅ Send to Single User
-    // ===================================================
-
-    if (userId) {
-      await sendPushToUser(
-        userId,
-        title || "Notification",
-        body || "",
-        data || {}
-      );
-
-      return res.json({
-        success: true,
-        message: "Notification sent to user",
-      });
+    // ── Validation ───────────────────────────────────────────────────────────
+    if (!title || !body) {
+      return res.status(400).json({ success: false, error: "title and body are required" });
     }
 
-    // ===================================================
-    // ✅ Send by Role
-    // role = user / owner / turf-operator
-    // ===================================================
+    // ── Send to single user ──────────────────────────────────────────────────
+    if (userId) {
+      await sendPushToUser(userId, title, body, data || {});
+      return res.json({ success: true, message: "Notification sent to user" });
+    }
 
+    // ── Send by role (or all users if no role given) ─────────────────────────
     let query = db.collection("users");
-
     if (role) {
       query = query.where("role", "==", role);
     }
 
     const snap = await query.get();
-
     let total = 0;
 
     await Promise.allSettled(
       snap.docs.map(async (doc) => {
         const u = doc.data();
-
         if (!u.expoPushToken) return;
-
         await fetch(EXPO_PUSH_URL, {
           method: "POST",
-          headers: {
-            Accept: "application/json",
-            "Content-Type": "application/json",
-          },
+          headers: { Accept: "application/json", "Content-Type": "application/json" },
           body: JSON.stringify({
             to: u.expoPushToken,
             sound: "default",
-            title: title || "Notification",
-            body: body || "",
+            title,
+            body,
             data: data || {},
             channelId: "bookora-default",
             priority: "high",
           }),
         });
-
         total++;
       })
     );
 
-    return res.json({
-      success: true,
-      total,
-      message: "Notifications sent",
-    });
+    return res.json({ success: true, total, message: "Notifications sent" });
 
   } catch (e) {
-    console.error("admin notification error: - server.js:1420", e);
-
-    return res.status(500).json({
-      success: false,
-      error: e.message,
-    });
+    console.error("admin notification error: - server.js:1437", e);
+    return res.status(500).json({ success: false, error: e.message });
   }
 });
 
@@ -1443,7 +1456,7 @@ const PORT =
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1446", err);
+  console.error("Global Error: - server.js:1459", err);
 
   res.status(500).json({
     success: false,
