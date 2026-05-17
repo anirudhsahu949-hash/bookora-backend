@@ -70,12 +70,23 @@ const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 
 async function sendPushToUser(userId, title, body, data = {}) {
   try {
-    if (!userId) return;
+    if (!userId) {
+      console.log("sendPushToUser: no userId provided - server.js:74");
+      return;
+    }
     const userDoc = await db.collection("users").doc(userId).get();
-    if (!userDoc.exists) return;
+    if (!userDoc.exists) {
+      console.log(`sendPushToUser: no user doc for ${userId} - server.js:79`);
+      return;
+    }
     const token = userDoc.data()?.expoPushToken;
-    if (!token || !token.startsWith("ExponentPushToken[")) return;
-    await fetch(EXPO_PUSH_URL, {
+    console.log(`sendPushToUser: token for ${userId} = ${token} - server.js:83`); // ← add this
+    if (!token || !token.startsWith("ExponentPushToken[")) {
+      console.log(`sendPushToUser: invalid token for ${userId} - server.js:85`);
+      return;
+    }
+
+    const response = await fetch(EXPO_PUSH_URL, {
       method: "POST",
       headers: { "Accept": "application/json", "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -85,9 +96,13 @@ async function sendPushToUser(userId, title, body, data = {}) {
         priority: "high",
       }),
     });
-    console.log(`Push sent ✅ to ${userId} - server.js:88`);
+
+    const result = await response.json(); // ← add this
+    console.log(`sendPushToUser result for ${userId}: - server.js:101`, JSON.stringify(result)); // ← add this
+
+    console.log(`Push sent ✅ to ${userId} - server.js:103`);
   } catch (e) {
-    console.error("sendPushToUser failed (nonfatal): - server.js:90", e.message);
+    console.error("sendPushToUser failed: - server.js:105", e.message);
   }
 }
 
@@ -381,9 +396,9 @@ if (advanceAmount > totalAmount) {
       // ===================================================
       // ✅ Razorpay Order
       // ===================================================
-      console.log("Booking Type: - server.js:384", finalBookingType);
-console.log("Total Amount: - server.js:385", totalAmount);
-console.log("Advance Amount: - server.js:386", advanceAmount);     
+      console.log("Booking Type: - server.js:399", finalBookingType);
+console.log("Total Amount: - server.js:400", totalAmount);
+console.log("Advance Amount: - server.js:401", advanceAmount);     
       
       const order =
         await razorpay.orders.create({
@@ -916,7 +931,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
       });
 
     } catch (err) {
-  console.error("verifypayment error: - server.js:919", err);
+  console.error("verifypayment error: - server.js:934", err);
 
   try {
     if (order_id) {
@@ -936,7 +951,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
       }
     }
   } catch (e) {
-    console.log("Failed order update: - server.js:939", e);
+    console.log("Failed order update: - server.js:954", e);
   }
 
   return res.status(500).json({
@@ -1117,11 +1132,11 @@ if (bookingDay < today) {
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
  
-        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1120`);
+        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1135`);
       } catch (refundError) {
         // Refund failed — log it but don't fail the cancellation
         // The booking is still cancelled; refund will need manual processing
-        console.error("Razorpay refund error: - server.js:1124", refundError.message);
+        console.error("Razorpay refund error: - server.js:1139", refundError.message);
  
         await bookingRef.update({
           refundStatus:      "failed",
@@ -1166,7 +1181,7 @@ if (bookingDay < today) {
     });
  
   } catch (err) {
-    console.error("cancelbooking error: - server.js:1169", err);
+    console.error("cancelbooking error: - server.js:1184", err);
     return res.status(500).json({
       success: false,
       error: err.message || "Cancellation failed. Please try again.",
@@ -1226,7 +1241,7 @@ app.get("/refund-status/:bookingId",refundStatusLimiter, async (req, res) => {
     });
  
   } catch (err) {
-    console.error("refundstatus error: - server.js:1229", err);
+    console.error("refundstatus error: - server.js:1244", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1294,7 +1309,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, async (req, res) => {
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" });
       });
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1297`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1312`);
     }
 
     // 2. Unlink any operators who belonged to this owner
@@ -1308,7 +1323,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, async (req, res) => {
         batch.update(d.ref, { ownerId: null, status: "inactive" });
       });
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1311`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1326`);
     }
 
     // 3. Delete Firebase Auth account
@@ -1323,7 +1338,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, async (req, res) => {
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:1326", e);
+    console.error("deleteowner error: - server.js:1341", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1372,7 +1387,7 @@ app.post("/send-reminders", async (req, res) => {
     );
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1375", e);
+    console.error("sendreminders error: - server.js:1390", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1434,7 +1449,7 @@ app.post("/send-admin-notification", async (req, res) => {
     return res.json({ success: true, total, message: "Notifications sent" });
 
   } catch (e) {
-    console.error("admin notification error: - server.js:1437", e);
+    console.error("admin notification error: - server.js:1452", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1456,7 +1471,7 @@ const PORT =
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1459", err);
+  console.error("Global Error: - server.js:1474", err);
 
   res.status(500).json({
     success: false,
