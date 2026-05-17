@@ -916,28 +916,35 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
       await Promise.all(deletePromises);
 
       // 🔔 Notify user — booking confirmed
-      sendPushToUser(
-        orderData.userId,
-        "🎉 Booking Confirmed!",
-        `Your slot at ${orderData.turfName} on ${orderData.dateString} is confirmed. See you there!`,
-        { screen: "bookings", bookingId }
-      );
+     const slotSummary = orderData.slots?.slice(0, 2).join(", ") || "";
+const dateOnly = orderData.dateString?.split(" ").slice(0, 3).join(" ") || orderData.dateString;
+
+sendPushToUser(
+  orderData.userId,
+  "🎉 Booking Confirmed!",
+  `Your slot at ${orderData.turfName} on ${dateOnly} — ${slotSummary} is confirmed. See you there!`,
+  { screen: "bookings", bookingId }
+);
       // 🔔 Notify owner — new booking received
-      if (orderData.ownerId) {
-        sendPushToUser(
-          orderData.ownerId,
-          "📅 New Booking",
-          `${userName || "A user"} booked ${orderData.slots?.length || 1} slot(s) at ${orderData.turfName} on ${orderData.dateString}.`,
-          { screen: "owner-bookings", bookingId }
-        );
-      }
+     if (orderData.ownerId) {
+  const ownerSlotSummary = orderData.slots?.slice(0, 2).join(", ") || "";
+  const ownerDateOnly = orderData.dateString?.split(" ").slice(0, 3).join(" ") || orderData.dateString;
+  const moreSlots = orderData.slots?.length > 2 ? ` +${orderData.slots.length - 2} more` : "";
+
+  sendPushToUser(
+    orderData.ownerId,
+    "📅 New Booking",
+    `${userName || "A user"} booked at ${orderData.turfName} on ${ownerDateOnly} — ${ownerSlotSummary}${moreSlots}`,
+    { screen: "owner-bookings", bookingId }
+  );
+}
 
       return res.json({
         success: true,
       });
 
     } catch (err) {
-  console.error("verifypayment error: - server.js:940", err);
+  console.error("verifypayment error: - server.js:947", err);
 
   try {
     if (order_id) {
@@ -957,7 +964,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
       }
     }
   } catch (e) {
-    console.log("Failed order update: - server.js:960", e);
+    console.log("Failed order update: - server.js:967", e);
   }
 
   return res.status(500).json({
@@ -1138,11 +1145,11 @@ if (bookingDay < today) {
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
  
-        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1141`);
+        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1148`);
       } catch (refundError) {
         // Refund failed — log it but don't fail the cancellation
         // The booking is still cancelled; refund will need manual processing
-        console.error("Razorpay refund error: - server.js:1145", refundError.message);
+        console.error("Razorpay refund error: - server.js:1152", refundError.message);
  
         await bookingRef.update({
           refundStatus:      "failed",
@@ -1187,7 +1194,7 @@ if (bookingDay < today) {
     });
  
   } catch (err) {
-    console.error("cancelbooking error: - server.js:1190", err);
+    console.error("cancelbooking error: - server.js:1197", err);
     return res.status(500).json({
       success: false,
       error: err.message || "Cancellation failed. Please try again.",
@@ -1247,7 +1254,7 @@ app.get("/refund-status/:bookingId",refundStatusLimiter, async (req, res) => {
     });
  
   } catch (err) {
-    console.error("refundstatus error: - server.js:1250", err);
+    console.error("refundstatus error: - server.js:1257", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1315,7 +1322,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, async (req, res) => {
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" });
       });
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1318`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1325`);
     }
 
     // 2. Unlink any operators who belonged to this owner
@@ -1329,7 +1336,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, async (req, res) => {
         batch.update(d.ref, { ownerId: null, status: "inactive" });
       });
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1332`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1339`);
     }
 
     // 3. Delete Firebase Auth account
@@ -1344,7 +1351,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, async (req, res) => {
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:1347", e);
+    console.error("deleteowner error: - server.js:1354", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1393,7 +1400,7 @@ app.post("/send-reminders", async (req, res) => {
     );
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1396", e);
+    console.error("sendreminders error: - server.js:1403", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1457,7 +1464,7 @@ const image = imageUrl || null;
     return res.json({ success: true, total, message: "Notifications sent" });
 
   } catch (e) {
-    console.error("admin notification error: - server.js:1460", e);
+    console.error("admin notification error: - server.js:1467", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1479,7 +1486,7 @@ const PORT =
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1482", err);
+  console.error("Global Error: - server.js:1489", err);
 
   res.status(500).json({
     success: false,
