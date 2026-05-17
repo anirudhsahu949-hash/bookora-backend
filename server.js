@@ -22,6 +22,7 @@ const rateLimitHandler = (req, res) => {
 const orderLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 10,
+   trustProxy: 1,   // ← add this to every limiter
   standardHeaders: true,
   legacyHeaders: false,
   handler: rateLimitHandler,
@@ -31,6 +32,7 @@ const orderLimiter = rateLimit({
 const verifyLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 20,
+   trustProxy: 1,   // ← add this to every limiter
   standardHeaders: true,
   legacyHeaders: false,
   handler: rateLimitHandler,
@@ -40,6 +42,7 @@ const verifyLimiter = rateLimit({
 const cancelLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 5,
+   trustProxy: 1,   // ← add this to every limiter
   standardHeaders: true,
   legacyHeaders: false,
   handler: rateLimitHandler,
@@ -49,6 +52,7 @@ const cancelLimiter = rateLimit({
 const refundStatusLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 30,
+   trustProxy: 1,   // ← add this to every limiter
   standardHeaders: true,
   legacyHeaders: false,
   handler: rateLimitHandler,
@@ -58,6 +62,7 @@ const refundStatusLimiter = rateLimit({
 const adminActionLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
+   trustProxy: 1,   // ← add this to every limiter
   standardHeaders: true,
   legacyHeaders: false,
   handler: rateLimitHandler,
@@ -71,18 +76,18 @@ const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 async function sendPushToUser(userId, title, body, data = {}) {
   try {
     if (!userId) {
-      console.log("sendPushToUser: no userId provided - server.js:74");
+      console.log("sendPushToUser: no userId provided - server.js:79");
       return;
     }
     const userDoc = await db.collection("users").doc(userId).get();
     if (!userDoc.exists) {
-      console.log(`sendPushToUser: no user doc for ${userId} - server.js:79`);
+      console.log(`sendPushToUser: no user doc for ${userId} - server.js:84`);
       return;
     }
     const token = userDoc.data()?.expoPushToken;
-    console.log(`sendPushToUser: token for ${userId} = ${token} - server.js:83`); // ← add this
+    console.log(`sendPushToUser: token for ${userId} = ${token} - server.js:88`); // ← add this
     if (!token || !token.startsWith("ExponentPushToken[")) {
-      console.log(`sendPushToUser: invalid token for ${userId} - server.js:85`);
+      console.log(`sendPushToUser: invalid token for ${userId} - server.js:90`);
       return;
     }
 
@@ -98,11 +103,11 @@ async function sendPushToUser(userId, title, body, data = {}) {
     });
 
     const result = await response.json(); // ← add this
-    console.log(`sendPushToUser result for ${userId}: - server.js:101`, JSON.stringify(result)); // ← add this
+    console.log(`sendPushToUser result for ${userId}: - server.js:106`, JSON.stringify(result)); // ← add this
 
-    console.log(`Push sent ✅ to ${userId} - server.js:103`);
+    console.log(`Push sent ✅ to ${userId} - server.js:108`);
   } catch (e) {
-    console.error("sendPushToUser failed: - server.js:105", e.message);
+    console.error("sendPushToUser failed: - server.js:110", e.message);
   }
 }
 
@@ -146,6 +151,7 @@ try {
 const db = admin.firestore();
 
 const app = express();
+app.set("trust proxy", 1);
 
 app.use(
   express.json({
@@ -396,9 +402,9 @@ if (advanceAmount > totalAmount) {
       // ===================================================
       // ✅ Razorpay Order
       // ===================================================
-      console.log("Booking Type: - server.js:399", finalBookingType);
-console.log("Total Amount: - server.js:400", totalAmount);
-console.log("Advance Amount: - server.js:401", advanceAmount);     
+      console.log("Booking Type: - server.js:405", finalBookingType);
+console.log("Total Amount: - server.js:406", totalAmount);
+console.log("Advance Amount: - server.js:407", advanceAmount);     
       
       const order =
         await razorpay.orders.create({
@@ -931,7 +937,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
       });
 
     } catch (err) {
-  console.error("verifypayment error: - server.js:934", err);
+  console.error("verifypayment error: - server.js:940", err);
 
   try {
     if (order_id) {
@@ -951,7 +957,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
       }
     }
   } catch (e) {
-    console.log("Failed order update: - server.js:954", e);
+    console.log("Failed order update: - server.js:960", e);
   }
 
   return res.status(500).json({
@@ -1132,11 +1138,11 @@ if (bookingDay < today) {
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
  
-        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1135`);
+        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1141`);
       } catch (refundError) {
         // Refund failed — log it but don't fail the cancellation
         // The booking is still cancelled; refund will need manual processing
-        console.error("Razorpay refund error: - server.js:1139", refundError.message);
+        console.error("Razorpay refund error: - server.js:1145", refundError.message);
  
         await bookingRef.update({
           refundStatus:      "failed",
@@ -1181,7 +1187,7 @@ if (bookingDay < today) {
     });
  
   } catch (err) {
-    console.error("cancelbooking error: - server.js:1184", err);
+    console.error("cancelbooking error: - server.js:1190", err);
     return res.status(500).json({
       success: false,
       error: err.message || "Cancellation failed. Please try again.",
@@ -1241,7 +1247,7 @@ app.get("/refund-status/:bookingId",refundStatusLimiter, async (req, res) => {
     });
  
   } catch (err) {
-    console.error("refundstatus error: - server.js:1244", err);
+    console.error("refundstatus error: - server.js:1250", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1309,7 +1315,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, async (req, res) => {
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" });
       });
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1312`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1318`);
     }
 
     // 2. Unlink any operators who belonged to this owner
@@ -1323,7 +1329,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, async (req, res) => {
         batch.update(d.ref, { ownerId: null, status: "inactive" });
       });
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1326`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1332`);
     }
 
     // 3. Delete Firebase Auth account
@@ -1338,7 +1344,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, async (req, res) => {
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:1341", e);
+    console.error("deleteowner error: - server.js:1347", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1387,7 +1393,7 @@ app.post("/send-reminders", async (req, res) => {
     );
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1390", e);
+    console.error("sendreminders error: - server.js:1396", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1449,7 +1455,7 @@ app.post("/send-admin-notification", async (req, res) => {
     return res.json({ success: true, total, message: "Notifications sent" });
 
   } catch (e) {
-    console.error("admin notification error: - server.js:1452", e);
+    console.error("admin notification error: - server.js:1458", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1471,7 +1477,7 @@ const PORT =
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1474", err);
+  console.error("Global Error: - server.js:1480", err);
 
   res.status(500).json({
     success: false,
