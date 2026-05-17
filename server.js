@@ -1409,7 +1409,8 @@ app.post("/send-admin-notification", async (req, res) => {
   }
 
   try {
-    const { title, body, userId, role, image, data } = req.body;
+    const { title, body, userId, role, data, imageUrl } = req.body;
+const image = imageUrl || null;
 
     // ── Validation ───────────────────────────────────────────────────────────
     if (!title || !body) {
@@ -1446,6 +1447,7 @@ app.post("/send-admin-notification", async (req, res) => {
             data: data || {},
             channelId: "bookora-default",
             priority: "high",
+             ...(image ? { richContent: { image } } : {}),  // ← add this lin
           }),
         });
         total++;
@@ -1455,7 +1457,7 @@ app.post("/send-admin-notification", async (req, res) => {
     return res.json({ success: true, total, message: "Notifications sent" });
 
   } catch (e) {
-    console.error("admin notification error: - server.js:1458", e);
+    console.error("admin notification error: - server.js:1460", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1477,7 +1479,7 @@ const PORT =
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1480", err);
+  console.error("Global Error: - server.js:1482", err);
 
   res.status(500).json({
     success: false,
