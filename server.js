@@ -916,49 +916,149 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
       await Promise.all(deletePromises);
 
       // 🔔 Notify user — booking confirmed
-    // ─── Helper: Convert slot array to "9:00 AM – 11:00 AM" ───────────────────
-function slotsToTimeRange(slots) {
-  if (!slots || slots.length === 0) return "";
+     function parseTimePart(t) {
+  const parts = t.trim().split(" ");
+  const [hStr, mStr] = (parts[0] || "0:0").split(":");
 
-  // Sort slots to ensure correct order
-  const sorted = [...slots].sort();
+  let h = Number(hStr);
+  const m = Number(mStr || 0);
 
-  const toAmPm = (time) => {
-    const [h, m] = time.split(":").map(Number);
-    const period = h >= 12 ? "PM" : "AM";
-    const hour = h % 12 || 12;
-    return `${hour}:${String(m).padStart(2, "0")} ${period}`;
-  };
+  const period = (parts[1] || "").toUpperCase();
 
-  // Start = first slot, End = last slot + 30 minutes
-  const startTime = toAmPm(sorted[0]);
+  if (period === "PM" && h !== 12) h += 12;
+  if (period === "AM" && h === 12) h = 0;
 
-  const [lastH, lastM] = sorted[sorted.length - 1].split(":").map(Number);
-  const endTotalMinutes = lastH * 60 + lastM + 30;
-  const endH = Math.floor(endTotalMinutes / 60) % 24;
-  const endM = endTotalMinutes % 60;
-  const endTime = toAmPm(`${String(endH).padStart(2, "0")}:${String(endM).padStart(2, "0")}`);
-
-  return `${startTime} – ${endTime}`;
+  return h * 60 + m;
 }
-const timeRange = slotsToTimeRange(orderData.slots);
-const dateOnly = orderData.dateString?.split(" ").slice(0, 3).join(" ") || orderData.dateString;
 
-// 🔔 User — Booking Confirmed
+function formatMinutes(mins) {
+  let h = Math.floor(mins / 60);
+  const m = mins % 60;
+
+  const suffix = h >= 12 ? "PM" : "AM";
+
+  if (h > 12) h -= 12;
+  if (h === 0) h = 12;
+
+  return `${h}:${String(m).padStart(2, "0")} ${suffix}`;
+}
+
+function getProfessionalSlotRange(slots = []) {
+  if (!slots.length) return "";
+
+  const parsed = slots
+    .map((slot) => {
+      const parts = slot.split(" - ");
+
+      if (parts.length < 2) return null;
+
+      return {
+        start: parseTimePart(parts[0]),
+        end: parseTimePart(parts[1]),
+      };
+    })
+    .filter(Boolean);
+
+  if (!parsed.length) return "";
+
+  parsed.sort((a, b) => a.start - b.start);
+
+  const first = parsed[0];
+  const last = parsed[parsed.length - 1];
+
+  return `${formatMinutes(first.start)} – ${formatMinutes(last.end)}`;
+}
+
+function parseTimePart(t) {
+  const parts = t.trim().split(" ");
+  const [hStr, mStr] = (parts[0] || "0:0").split(":");
+
+  let h = Number(hStr);
+  const m = Number(mStr || 0);
+
+  const period = (parts[1] || "").toUpperCase();
+
+  if (period === "PM" && h !== 12) h += 12;
+  if (period === "AM" && h === 12) h = 0;
+
+  return h * 60 + m;
+}
+
+function formatMinutes(mins) {
+  let h = Math.floor(mins / 60);
+  const m = mins % 60;
+
+  const suffix = h >= 12 ? "PM" : "AM";
+
+  if (h > 12) h -= 12;
+  if (h === 0) h = 12;
+
+  return `${h}:${String(m).padStart(2, "0")} ${suffix}`;
+}
+
+function getProfessionalSlotRange(slots = []) {
+  if (!Array.isArray(slots) || !slots.length) return "";
+
+  const parsed = slots
+    .map((slot) => {
+      const parts = slot.split(" - ");
+
+      if (parts.length < 2) return null;
+
+      return {
+        start: parseTimePart(parts[0]),
+        end: parseTimePart(parts[1]),
+      };
+    })
+    .filter(Boolean);
+
+  if (!parsed.length) return "";
+
+  parsed.sort((a, b) => a.start - b.start);
+
+  const first = parsed[0];
+  const last = parsed[parsed.length - 1];
+
+  return `${formatMinutes(first.start)} – ${formatMinutes(last.end)}`;
+}
+
+// ─────────────────────────────────────────────
+// Professional slot + date
+// ─────────────────────────────────────────────
+
+const slotSummary = getProfessionalSlotRange(orderData.slots);
+
+const dateOnly =
+  orderData.dateString?.split(" ").slice(0, 3).join(" ") ||
+  orderData.dateString;
+
+// ─────────────────────────────────────────────
+// USER NOTIFICATION
+// ─────────────────────────────────────────────
+
 sendPushToUser(
   orderData.userId,
   "🎉 Booking Confirmed!",
-  `${orderData.turfName} · ${dateOnly} · ${timeRange}. See you there!`,
-  { screen: "bookings", bookingId }
+  `Your booking at ${orderData.turfName} on ${dateOnly} from ${slotSummary} is confirmed.`,
+  {
+    screen: "bookings",
+    bookingId,
+  }
 );
 
-// 🔔 Owner — New Booking
+// ─────────────────────────────────────────────
+// OWNER NOTIFICATION
+// ─────────────────────────────────────────────
+
 if (orderData.ownerId) {
   sendPushToUser(
     orderData.ownerId,
-    "📅 New Booking Received",
-    `${userName || "Someone"} booked ${orderData.turfName} · ${dateOnly} · ${timeRange}`,
-    { screen: "owner-bookings", bookingId }
+    "📅 New Booking",
+    `${userName || "A user"} booked ${orderData.turfName} on ${dateOnly} from ${slotSummary}.`,
+    {
+      screen: "owner-bookings",
+      bookingId,
+    }
   );
 }
 
@@ -967,7 +1067,7 @@ if (orderData.ownerId) {
       });
 
     } catch (err) {
-  console.error("verifypayment error: - server.js:970", err);
+  console.error("verifypayment error: - server.js:1070", err);
 
   try {
     if (order_id) {
@@ -987,7 +1087,7 @@ if (orderData.ownerId) {
       }
     }
   } catch (e) {
-    console.log("Failed order update: - server.js:990", e);
+    console.log("Failed order update: - server.js:1090", e);
   }
 
   return res.status(500).json({
@@ -1168,11 +1268,11 @@ if (bookingDay < today) {
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
  
-        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1171`);
+        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1271`);
       } catch (refundError) {
         // Refund failed — log it but don't fail the cancellation
         // The booking is still cancelled; refund will need manual processing
-        console.error("Razorpay refund error: - server.js:1175", refundError.message);
+        console.error("Razorpay refund error: - server.js:1275", refundError.message);
  
         await bookingRef.update({
           refundStatus:      "failed",
@@ -1217,7 +1317,7 @@ if (bookingDay < today) {
     });
  
   } catch (err) {
-    console.error("cancelbooking error: - server.js:1220", err);
+    console.error("cancelbooking error: - server.js:1320", err);
     return res.status(500).json({
       success: false,
       error: err.message || "Cancellation failed. Please try again.",
@@ -1277,7 +1377,7 @@ app.get("/refund-status/:bookingId",refundStatusLimiter, async (req, res) => {
     });
  
   } catch (err) {
-    console.error("refundstatus error: - server.js:1280", err);
+    console.error("refundstatus error: - server.js:1380", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1345,7 +1445,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, async (req, res) => {
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" });
       });
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1348`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1448`);
     }
 
     // 2. Unlink any operators who belonged to this owner
@@ -1359,7 +1459,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, async (req, res) => {
         batch.update(d.ref, { ownerId: null, status: "inactive" });
       });
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1362`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1462`);
     }
 
     // 3. Delete Firebase Auth account
@@ -1374,7 +1474,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, async (req, res) => {
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:1377", e);
+    console.error("deleteowner error: - server.js:1477", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1423,7 +1523,7 @@ app.post("/send-reminders", async (req, res) => {
     );
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1426", e);
+    console.error("sendreminders error: - server.js:1526", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1487,7 +1587,7 @@ const image = imageUrl || null;
     return res.json({ success: true, total, message: "Notifications sent" });
 
   } catch (e) {
-    console.error("admin notification error: - server.js:1490", e);
+    console.error("admin notification error: - server.js:1590", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1509,7 +1609,7 @@ const PORT =
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1512", err);
+  console.error("Global Error: - server.js:1612", err);
 
   res.status(500).json({
     success: false,
