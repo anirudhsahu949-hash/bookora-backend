@@ -203,15 +203,52 @@ function getProfessionalSlotRange(slots = []) {
 
 // =======================================================
 // ✅ ADMIN AUTH MIDDLEWARE
-// FIX ✅: Centralized admin secret check so it can be reused.
-// Also added Firebase ID token verification option.
+//
+// BUG 3 FIX: Replaced hardcoded ADMIN_SECRET check with Firebase ID token
+// verification. The old approach put ADMIN_SECRET in the client bundle
+// (EXPO_PUBLIC_* variables are visible in the compiled APK). Anyone could
+// decompile the app and call admin endpoints freely.
+//
+// NEW APPROACH:
+//   Client sends:  Authorization: Bearer <Firebase ID token>
+//   Server does:   admin.auth().verifyIdToken(token) → checks role === "admin"
+//
+// Firebase ID tokens are short-lived (1hr), cryptographically signed by Google,
+// and impossible to forge. No secret ever touches the client.
+//
+// MIGRATION: remove ADMIN_SECRET and EXPO_PUBLIC_ADMIN_SECRET from your .env
+// and from Render environment variables — they are no longer needed.
 // =======================================================
-function requireAdminSecret(req, res, next) {
-  const secret = req.headers["x-admin-secret"];
-  if (!secret || secret !== process.env.ADMIN_SECRET) {
-    return res.status(401).json({ success: false, error: "Unauthorized" });
+async function requireAdminSecret(req, res, next) {
+  try {
+    const authHeader = req.headers["authorization"] || "";
+    const idToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+
+    if (!idToken) {
+      return res.status(401).json({ success: false, error: "Missing authorization token" });
+    }
+
+    // Verify the token is a valid Firebase ID token (not expired, not tampered)
+    const decoded = await admin.auth().verifyIdToken(idToken);
+
+    // Now check the user's role in Firestore — token alone doesn't carry role
+    const userDoc = await db.collection("users").doc(decoded.uid).get();
+    if (!userDoc.exists) {
+      return res.status(403).json({ success: false, error: "User not found" });
+    }
+
+    const role = userDoc.data()?.role;
+    if (role !== "admin") {
+      return res.status(403).json({ success: false, error: "Admin access required" });
+    }
+
+    // Attach uid to request so handlers can use it if needed
+    req.adminUid = decoded.uid;
+    next();
+  } catch (e) {
+    console.error("requireAdminSecret auth error: - server.js:249", e.message);
+    return res.status(401).json({ success: false, error: "Invalid or expired token" });
   }
-  next();
 }
 
 // =======================================================
@@ -300,9 +337,9 @@ app.post("/create-order", orderLimiter, async (req, res) => {
 
     const remainingAmount = Math.max(totalAmount - advanceAmount, 0);
 
-    console.log("Booking Type: - server.js:303", finalBookingType);
-    console.log("Total Amount: - server.js:304", totalAmount);
-    console.log("Advance Amount: - server.js:305", advanceAmount);
+    console.log("Booking Type: - server.js:340", finalBookingType);
+    console.log("Total Amount: - server.js:341", totalAmount);
+    console.log("Advance Amount: - server.js:342", advanceAmount);
 
     const order = await razorpay.orders.create({
       amount: advanceAmount * 100,
@@ -345,7 +382,7 @@ app.post("/create-order", orderLimiter, async (req, res) => {
       key: process.env.KEY_ID,
     });
   } catch (err) {
-    console.error("createorder error: - server.js:348", err);
+    console.error("createorder error: - server.js:385", err);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -514,7 +551,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
           userEmail = u.email || "";
         }
       } catch (e) {
-        console.warn("Could not fetch user for name enrichment: - server.js:517", e.message);
+        console.warn("Could not fetch user for name enrichment: - server.js:554", e.message);
       }
 
       // Update booking with actual user name (non-critical)
@@ -522,7 +559,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         db.collection("bookings")
           .doc(bookingId)
           .update({ userName, userPhone, userEmail })
-          .catch((e) => console.warn("Name update failed: - server.js:525", e.message));
+          .catch((e) => console.warn("Name update failed: - server.js:562", e.message));
       }
     }
 
@@ -541,7 +578,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
 
       await Promise.all(deletePromises);
     } catch (e) {
-      console.warn("Lock cleanup failed (noncritical): - server.js:544", e.message);
+      console.warn("Lock cleanup failed (noncritical): - server.js:581", e.message);
     }
 
     // Push notifications (non-blocking)
@@ -567,7 +604,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
 
     return res.json({ success: true, bookingId });
   } catch (err) {
-    console.error("verifypayment error: - server.js:570", err);
+    console.error("verifypayment error: - server.js:607", err);
 
     // Mark order failed (best effort)
     try {
@@ -582,7 +619,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         }
       }
     } catch (e) {
-      console.warn("Failed order update: - server.js:585", e.message);
+      console.warn("Failed order update: - server.js:622", e.message);
     }
 
     return res.status(500).json({
@@ -705,7 +742,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
 
       await Promise.all(lockDeletePromises);
     } catch (e) {
-      console.warn("Lock cleanup on cancel failed: - server.js:708", e.message);
+      console.warn("Lock cleanup on cancel failed: - server.js:745", e.message);
     }
 
     // Razorpay refund
@@ -726,9 +763,9 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
           refundStatus: "initiated",
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
-        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:729`);
+        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:766`);
       } catch (refundError) {
-        console.error("Razorpay refund error: - server.js:731", refundError.message);
+        console.error("Razorpay refund error: - server.js:768", refundError.message);
         await bookingRef.update({
           refundStatus: "failed",
           refundError: refundError.message,
@@ -769,7 +806,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
           : "Booking cancelled successfully.",
     });
   } catch (err) {
-    console.error("cancelbooking error: - server.js:772", err);
+    console.error("cancelbooking error: - server.js:809", err);
     return res.status(500).json({
       success: false,
       error: err.message || "Cancellation failed. Please try again.",
@@ -821,7 +858,7 @@ app.get("/refund-status/:bookingId", refundStatusLimiter, async (req, res) => {
       refundAmount: booking.refundAmount || 0,
     });
   } catch (err) {
-    console.error("refundstatus error: - server.js:824", err);
+    console.error("refundstatus error: - server.js:861", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -904,7 +941,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" })
       );
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:907`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:944`);
     }
 
     // Unlink operators
@@ -919,7 +956,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
         batch.update(d.ref, { ownerId: null, turfId: null, turfName: "", status: "inactive" })
       );
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:922`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:959`);
     }
 
     await admin.auth().deleteUser(uid);
@@ -931,7 +968,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:934", e);
+    console.error("deleteowner error: - server.js:971", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -973,7 +1010,7 @@ app.post("/send-reminders", async (req, res) => {
 
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:976", e);
+    console.error("sendreminders error: - server.js:1013", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1030,7 +1067,7 @@ app.post("/send-admin-notification", requireAdminSecret, async (req, res) => {
 
     return res.json({ success: true, total, message: "Notifications sent" });
   } catch (e) {
-    console.error("admin notification error: - server.js:1033", e);
+    console.error("admin notification error: - server.js:1070", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1046,7 +1083,7 @@ app.get("/", (req, res) => {
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1049", err);
+  console.error("Global Error: - server.js:1086", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -1055,5 +1092,5 @@ app.use((err, req, res, next) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:1058`);
+  console.log(`Server running on ${PORT} ✅ - server.js:1095`);
 });
