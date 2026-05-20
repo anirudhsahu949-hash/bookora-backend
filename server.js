@@ -96,7 +96,7 @@ const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 // NOTIF_IMAGE: shown as large icon (right thumbnail) on collapsed notification.
 // No imageUrl in android.notification = no big picture expansion, just thumbnail.
 const NOTIF_IMAGE =
-  "https://github.com/anirudhsahu949-hash/turf-images/blob/main/playon-logo/splash-v10.png?raw=true";
+  "https://github.com/anirudhsahu949-hash/turf-images/blob/main/playon-logo/playon-v7.png?raw=true";
 
 // ─── sendPushToUser ───────────────────────────────────────────────────────────
 // Always uses FCM when fcmToken available (supports icon + large icon thumbnail).
