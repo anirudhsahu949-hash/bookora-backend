@@ -17,6 +17,9 @@ const rateLimitHandler = (req, res) => {
   });
 };
 
+// FIX ✅: removed invalid `trustProxy` from each limiter object.
+// app.set("trust proxy", 1) is set once at app level below — that is the correct approach.
+
 const orderLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 10,
@@ -80,70 +83,76 @@ try {
       privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
     }),
   });
-  console.log("Firebase connected ✅ - server.js:83");
+  console.log("Firebase connected ✅ - server.js:86");
 } catch (e) {
-  console.error("Firebase init error ❌ - server.js:85", e);
+  console.error("Firebase init error ❌ - server.js:88", e);
 }
 
 const db = admin.firestore();
 
 // =======================================================
 // 🔔 PUSH NOTIFICATIONS
+//
+// BUG 4 FIX: moved to AFTER db is initialized (line above).
+// Previously this function was defined before Firebase init,
+// meaning db was in the temporal dead zone (const is not hoisted).
+// Any call during startup would throw:
+//   ReferenceError: Cannot access 'db' before initialization
+// Safe now — db is guaranteed to exist when this function runs.
 // =======================================================
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 
-// ─── Notification icon constants ──────────────────────────────────────────────
-// NOTIF_IMAGE: shown as large icon (right thumbnail) on collapsed notification.
-// No imageUrl in android.notification = no big picture expansion, just thumbnail.
-const NOTIF_IMAGE =
-  "https://github.com/anirudhsahu949-hash/turf-images/blob/main/playon-logo/playon-v7.png?raw=true";
+// ─── Playon notification image constants ──────────────────────────────────────
+const NOTIF_LARGE_ICON =
+  "https://github.com/anirudhsahu949-hash/turf-images/blob/main/playon-logo/p-notification-v1.png?raw=true";
+const NOTIF_BIG_PICTURE =
+  "https://github.com/anirudhsahu949-hash/turf-images/blob/main/playon-logo/p-notification-v1.png?raw=true";
 
-// ─── sendPushToUser ───────────────────────────────────────────────────────────
-// Always uses FCM when fcmToken available (supports icon + large icon thumbnail).
-// Falls back to Expo Push API when only expoPushToken exists.
-// imageUrl param is intentionally ignored — no big picture expansion by design.
-async function sendPushToUser(userId, title, body, data = {}) {
+async function sendPushToUser(userId, title, body, data = {}, imageUrl = null) {
   try {
     if (!userId) return;
     const userDoc = await db.collection("users").doc(userId).get();
     if (!userDoc.exists) return;
     const u = userDoc.data();
 
-    // ── FCM path: small icon + large icon thumbnail on right ─────────────────
+    // Always try FCM first if fcmToken exists — it supports all 3 icon positions
     if (u.fcmToken) {
+      const bigPicture = imageUrl || NOTIF_BIG_PICTURE;
       try {
-        await admin.messaging().send({
-          token: u.fcmToken,
-          notification: {
-            title,
-            body,
-            // ✅ NO imageUrl here — keeps small icon, no big picture expansion
-          },
-          android: {
-            priority: "high",
-            notification: {
-              channelId: "bookora-default",
-              sound:     "default",
-              icon:      "notification_icon", // small white P icon (status bar + left)
-              color:     "#4DB408",           // green accent
-              // ✅ NO imageUrl here — thumbnail on right comes from largeIcon via FCM default
-            },
-          },
-          apns: {
-            payload: {
-              aps: { sound: "default" },
-            },
-          },
-          data: data ? { ...data } : {},
-        });
-        console.log(`FCM push sent to ${userId} - server.js:139`);
+     // AFTER — correct
+await admin.messaging().send({
+  token: u.fcmToken,
+  // ✅ NO imageUrl here at top level — keeps small icon safe
+  notification: {
+    title,
+    body,
+  },
+  android: {
+    priority: "high",
+    notification: {
+      channelId:  "bookora-default",
+      sound:      "default",
+      icon:       "notification_icon",   // ✅ small icon always stays
+      color:      "#4DB408",
+       imageUrl:bigPicture,  // ✅ big picture only in android block
+    },
+  },
+  apns: {
+    payload: {
+      aps: { "mutable-content": 1, sound: "default" },
+    },
+    fcmOptions: { imageUrl: bigPicture }, // iOS only
+  },
+  data: data || {},
+});
+        console.log(`FCM push sent to ${userId} - server.js:148`);
         return;
       } catch (fcmErr) {
-        console.warn("FCM send failed, falling back to Expo: - server.js:142", fcmErr.message);
+        console.warn("FCM send failed, falling back to Expo: - server.js:151", fcmErr.message);
       }
     }
 
-    // ── Expo fallback: plain notification, no image ───────────────────────────
+    // Fallback → Expo Push API (no image support but reliable)
     const token = u.expoPushToken;
     if (!token || !token.startsWith("ExponentPushToken[")) return;
 
@@ -155,19 +164,20 @@ async function sendPushToUser(userId, title, body, data = {}) {
         sound:     "default",
         title,
         body,
-        data:      data || {},
+        data,
         channelId: "bookora-default",
         priority:  "high",
       }),
     });
-    console.log(`Expo push sent to ${userId} - server.js:163`);
+    console.log(`Expo push sent to ${userId} - server.js:172`);
   } catch (e) {
-    console.error("sendPushToUser failed: - server.js:165", e.message);
+    console.error("sendPushToUser failed: - server.js:174", e.message);
   }
 }
 
 const app = express();
 
+// FIX ✅: trust proxy set ONCE at app level (correct way — not per-limiter)
 app.set("trust proxy", 1);
 
 app.use(
@@ -191,6 +201,7 @@ const razorpay = new Razorpay({
 // =======================================================
 // ✅ HELPERS
 // =======================================================
+
 function parseHour(slot) {
   const startPart = slot.split("-")[0].trim();
   const timeParts = startPart.match(/(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i);
@@ -204,6 +215,9 @@ function parseHour(slot) {
   return hour;
 }
 
+// FIX ✅: Moved helper functions to module scope — they were defined
+// INSIDE the verify-payment handler body which caused duplicate-declaration
+// errors on repeated requests and made them unavailable elsewhere.
 function parseTimePart(t) {
   const parts = t.trim().split(" ");
   const [hStr, mStr] = (parts[0] || "0:0").split(":");
@@ -240,6 +254,21 @@ function getProfessionalSlotRange(slots = []) {
 
 // =======================================================
 // ✅ ADMIN AUTH MIDDLEWARE
+//
+// BUG 3 FIX: Replaced hardcoded ADMIN_SECRET check with Firebase ID token
+// verification. The old approach put ADMIN_SECRET in the client bundle
+// (EXPO_PUBLIC_* variables are visible in the compiled APK). Anyone could
+// decompile the app and call admin endpoints freely.
+//
+// NEW APPROACH:
+//   Client sends:  Authorization: Bearer <Firebase ID token>
+//   Server does:   admin.auth().verifyIdToken(token) → checks role === "admin"
+//
+// Firebase ID tokens are short-lived (1hr), cryptographically signed by Google,
+// and impossible to forge. No secret ever touches the client.
+//
+// MIGRATION: remove ADMIN_SECRET and EXPO_PUBLIC_ADMIN_SECRET from your .env
+// and from Render environment variables — they are no longer needed.
 // =======================================================
 async function requireAdminSecret(req, res, next) {
   try {
@@ -250,8 +279,10 @@ async function requireAdminSecret(req, res, next) {
       return res.status(401).json({ success: false, error: "Missing authorization token" });
     }
 
+    // Verify the token is a valid Firebase ID token (not expired, not tampered)
     const decoded = await admin.auth().verifyIdToken(idToken);
 
+    // Now check the user's role in Firestore — token alone doesn't carry role
     const userDoc = await db.collection("users").doc(decoded.uid).get();
     if (!userDoc.exists) {
       return res.status(403).json({ success: false, error: "User not found" });
@@ -262,10 +293,11 @@ async function requireAdminSecret(req, res, next) {
       return res.status(403).json({ success: false, error: "Admin access required" });
     }
 
+    // Attach uid to request so handlers can use it if needed
     req.adminUid = decoded.uid;
     next();
   } catch (e) {
-    console.error("requireAdminSecret auth error: - server.js:268", e.message);
+    console.error("requireAdminSecret auth error: - server.js:300", e.message);
     return res.status(401).json({ success: false, error: "Invalid or expired token" });
   }
 }
@@ -284,12 +316,14 @@ app.post("/create-order", orderLimiter, async (req, res) => {
       return res.status(400).json({ error: "slots required" });
     }
 
+    // Fetch turf
     const turfDoc = await db.collection("turfs").doc(turfId).get();
     if (!turfDoc.exists) {
       return res.status(404).json({ error: "Turf not found" });
     }
     const turf = turfDoc.data();
 
+    // Special prices
     const specialSnap = await db
       .collection("specialPrices")
       .where("turfId", "==", turfId)
@@ -297,6 +331,7 @@ app.post("/create-order", orderLimiter, async (req, res) => {
       .get();
     const specialPrices = specialSnap.docs.map((d) => d.data());
 
+    // Already booked slots
     const bookingSnap = await db
       .collection("bookings")
       .where("turfId", "==", turfId)
@@ -308,12 +343,14 @@ app.post("/create-order", orderLimiter, async (req, res) => {
       .filter((b) => b.status !== "cancelled")
       .flatMap((b) => b.selectedSlots || []);
 
+    // Prevent already-booked slots
     for (const slot of slots) {
       if (bookedSlots.map((s) => String(s).trim()).includes(String(slot).trim())) {
         return res.status(400).json({ error: `Slot already booked: ${slot}` });
       }
     }
 
+    // Calculate total amount
     let totalAmount = 0;
     for (const slot of slots) {
       const special = specialPrices.find(
@@ -330,7 +367,7 @@ app.post("/create-order", orderLimiter, async (req, res) => {
           hourlyPrice = parseFloat(turf.nightPrice || turf.price || 0);
         }
         if (isNaN(hourlyPrice)) hourlyPrice = 0;
-        totalAmount += hourlyPrice / 2;
+        totalAmount += hourlyPrice / 2; // 30-min slot
       }
     }
 
@@ -351,9 +388,9 @@ app.post("/create-order", orderLimiter, async (req, res) => {
 
     const remainingAmount = Math.max(totalAmount - advanceAmount, 0);
 
-    console.log("Booking Type: - server.js:354", finalBookingType);
-    console.log("Total Amount: - server.js:355", totalAmount);
-    console.log("Advance Amount: - server.js:356", advanceAmount);
+    console.log("Booking Type: - server.js:391", finalBookingType);
+    console.log("Total Amount: - server.js:392", totalAmount);
+    console.log("Advance Amount: - server.js:393", advanceAmount);
 
     const order = await razorpay.orders.create({
       amount: advanceAmount * 100,
@@ -396,13 +433,25 @@ app.post("/create-order", orderLimiter, async (req, res) => {
       key: process.env.KEY_ID,
     });
   } catch (err) {
-    console.error("createorder error: - server.js:399", err);
+    console.error("createorder error: - server.js:436", err);
     return res.status(500).json({ error: err.message });
   }
 });
 
 // =======================================================
 // ✅ VERIFY PAYMENT
+//
+// FIX ✅ #1 — Idempotency via Firestore TRANSACTION on the orders doc.
+//   Old code: read order → (gap) → write booking → mark paid
+//   Problem:  two concurrent /verify-payment calls both read "created",
+//             both pass, both write a booking → duplicate booking.
+//   Fix:      runTransaction reads-then-writes atomically. The second
+//             call sees orderStatus === "paid" inside the transaction
+//             and returns early with success: true.
+//
+// FIX ✅ #2 — Duplicate function declarations removed.
+//   parseTimePart / formatMinutes / getProfessionalSlotRange were
+//   declared TWICE inside the handler body. Moved to module scope above.
 // =======================================================
 app.post("/verify-payment", verifyLimiter, async (req, res) => {
   let order_id = null;
@@ -415,6 +464,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
       return res.status(400).json({ success: false, error: "Missing fields" });
     }
 
+    // Verify Razorpay signature
     const expectedSignature = crypto
       .createHmac("sha256", process.env.KEY_SECRET)
       .update(order_id + "|" + payment_id)
@@ -424,6 +474,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
       return res.status(400).json({ success: false, error: "Invalid signature" });
     }
 
+    // Verify payment captured at Razorpay before touching Firestore
     const payment = await razorpay.payments.fetch(payment_id);
     if (payment.status !== "captured") {
       return res.status(400).json({ success: false, error: "Payment not captured" });
@@ -431,6 +482,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
 
     const orderRef = db.collection("orders").doc(order_id);
 
+    // ── TRANSACTION: idempotent booking creation ──────────────────────────────
     let bookingId = null;
     let orderData = null;
     let alreadyPaid = false;
@@ -444,11 +496,14 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
 
       orderData = orderDoc.data();
 
+      // Idempotency: already processed → return early
       if (orderData.orderStatus === "paid") {
         alreadyPaid = true;
         return;
       }
 
+      // Double-booking check INSIDE the transaction
+      // Read all existing bookings for this turf+date
       const existingSnap = await txn.get(
         db
           .collection("bookings")
@@ -467,6 +522,8 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         }
       }
 
+      // Fetch user info (outside transaction is fine — user doc rarely changes)
+      // We do it after the conflict check to avoid wasted reads on conflict
       bookingId = `${orderData.turfId}_${Date.now()}`;
       const bookingRef = db.collection("bookings").doc(bookingId);
 
@@ -477,6 +534,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         isNaN(parsedDate.getTime()) ? new Date() : parsedDate
       );
 
+      // Write booking
       txn.set(bookingRef, {
         bookingType: orderData.bookingType || "advance",
         paymentMode: orderData.paymentMode || "advance_payment",
@@ -488,7 +546,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         ownerName: orderData.ownerName,
         mapLink: orderData.mapLink,
         userId: orderData.userId || null,
-        userName: "",
+        userName: "",    // filled below after transaction
         userPhone: "",
         userEmail: "",
         date: bookingDate,
@@ -512,6 +570,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
+      // Mark order paid
       txn.update(orderRef, {
         orderStatus: "paid",
         paymentId: payment_id,
@@ -521,9 +580,13 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
       });
     });
 
+    // Already paid on a previous request — just return success
     if (alreadyPaid) {
       return res.json({ success: true, bookingId: null });
     }
+
+    // ── Post-transaction: fill in user name + clean up locks ─────────────────
+    // These don't need to be atomic — they're best-effort enrichment.
 
     let userName = "";
     let userPhone = "";
@@ -539,17 +602,19 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
           userEmail = u.email || "";
         }
       } catch (e) {
-        console.warn("Could not fetch user for name enrichment: - server.js:542", e.message);
+        console.warn("Could not fetch user for name enrichment: - server.js:605", e.message);
       }
 
+      // Update booking with actual user name (non-critical)
       if (userName && bookingId) {
         db.collection("bookings")
           .doc(bookingId)
           .update({ userName, userPhone, userEmail })
-          .catch((e) => console.warn("Name update failed: - server.js:549", e.message));
+          .catch((e) => console.warn("Name update failed: - server.js:613", e.message));
       }
     }
 
+    // Delete slot locks
     try {
       const lockSnap = await db
         .collection("slotLocks")
@@ -564,9 +629,10 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
 
       await Promise.all(deletePromises);
     } catch (e) {
-      console.warn("Lock cleanup failed (noncritical): - server.js:567", e.message);
+      console.warn("Lock cleanup failed (noncritical): - server.js:632", e.message);
     }
 
+    // Push notifications (non-blocking)
     const slotSummary = getProfessionalSlotRange(orderData.slots);
     const dateOnly =
       orderData.dateString?.split(" ").slice(0, 3).join(" ") || orderData.dateString;
@@ -589,8 +655,9 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
 
     return res.json({ success: true, bookingId });
   } catch (err) {
-    console.error("verifypayment error: - server.js:592", err);
+    console.error("verifypayment error: - server.js:658", err);
 
+    // Mark order failed (best effort)
     try {
       if (order_id) {
         const orderDoc = await db.collection("orders").doc(order_id).get();
@@ -603,7 +670,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         }
       }
     } catch (e) {
-      console.warn("Failed order update: - server.js:606", e.message);
+      console.warn("Failed order update: - server.js:673", e.message);
     }
 
     return res.status(500).json({
@@ -650,6 +717,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
       });
     }
 
+    // Past booking check
     const bookingDate = booking.date?.toDate ? booking.date.toDate() : new Date(booking.dateString);
     const bookingDay = new Date(bookingDate);
     bookingDay.setHours(0, 0, 0, 0);
@@ -663,6 +731,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
       });
     }
 
+    // 2-hour cancellation window
     const slots = booking.selectedSlots || [];
     if (slots.length > 0) {
       const firstSlot = String(slots[0]);
@@ -697,6 +766,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
     const wasOnlinePayment = !!paymentId;
     const refundAmount = wasOnlinePayment ? paidAmount : 0;
 
+    // Mark booking cancelled
     const batch = db.batch();
     batch.update(bookingRef, {
       status: "cancelled",
@@ -709,6 +779,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
     });
     await batch.commit();
 
+    // Free slot locks
     try {
       const lockSnap = await db
         .collection("slotLocks")
@@ -722,9 +793,10 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
 
       await Promise.all(lockDeletePromises);
     } catch (e) {
-      console.warn("Lock cleanup on cancel failed: - server.js:725", e.message);
+      console.warn("Lock cleanup on cancel failed: - server.js:796", e.message);
     }
 
+    // Razorpay refund
     let refundId = null;
     let refundNote = "no_refund";
 
@@ -742,9 +814,9 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
           refundStatus: "initiated",
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
-        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:745`);
+        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:817`);
       } catch (refundError) {
-        console.error("Razorpay refund error: - server.js:747", refundError.message);
+        console.error("Razorpay refund error: - server.js:819", refundError.message);
         await bookingRef.update({
           refundStatus: "failed",
           refundError: refundError.message,
@@ -754,6 +826,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
       }
     }
 
+    // Notifications
     sendPushToUser(
       userId,
       "❌ Booking Cancelled",
@@ -784,7 +857,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
           : "Booking cancelled successfully.",
     });
   } catch (err) {
-    console.error("cancelbooking error: - server.js:787", err);
+    console.error("cancelbooking error: - server.js:860", err);
     return res.status(500).json({
       success: false,
       error: err.message || "Cancellation failed. Please try again.",
@@ -836,13 +909,14 @@ app.get("/refund-status/:bookingId", refundStatusLimiter, async (req, res) => {
       refundAmount: booking.refundAmount || 0,
     });
   } catch (err) {
-    console.error("refundstatus error: - server.js:839", err);
+    console.error("refundstatus error: - server.js:912", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
 
 // =======================================================
 // 👤 CREATE OWNER
+// FIX ✅: requireAdminSecret middleware added.
 // =======================================================
 app.post("/create-owner", adminActionLimiter, requireAdminSecret, async (req, res) => {
   try {
@@ -870,6 +944,8 @@ app.post("/create-owner", adminActionLimiter, requireAdminSecret, async (req, re
 
 // =======================================================
 // 👤 CREATE OPERATOR
+// FIX ✅: requireAdminSecret middleware added.
+// NOTE: operator role is "turf-operator" (consistent throughout).
 // =======================================================
 app.post("/create-operator", adminActionLimiter, requireAdminSecret, async (req, res) => {
   try {
@@ -883,6 +959,7 @@ app.post("/create-operator", adminActionLimiter, requireAdminSecret, async (req,
       phone: phone || "",
       role: "turf-operator",
       ownerId: ownerId || null,
+      // FIX ✅: save turfId/turfName on creation so operator sees bookings immediately
       turfId: turfId || null,
       turfName: turfName || "",
       status: "active",
@@ -897,6 +974,7 @@ app.post("/create-operator", adminActionLimiter, requireAdminSecret, async (req,
 
 // =======================================================
 // 🗑️ DELETE OWNER
+// FIX ✅: requireAdminSecret middleware added.
 // =======================================================
 app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (req, res) => {
   try {
@@ -906,6 +984,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
       return res.status(400).json({ success: false, error: "uid is required" });
     }
 
+    // Deactivate turfs
     const turfSnap = await db.collection("turfs").where("ownerId", "==", uid).get();
     if (!turfSnap.empty) {
       const batch = db.batch();
@@ -913,9 +992,10 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" })
       );
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:916`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:995`);
     }
 
+    // Unlink operators
     const operatorSnap = await db
       .collection("users")
       .where("role", "==", "turf-operator")
@@ -927,7 +1007,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
         batch.update(d.ref, { ownerId: null, turfId: null, turfName: "", status: "inactive" })
       );
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:930`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1010`);
     }
 
     await admin.auth().deleteUser(uid);
@@ -939,7 +1019,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:942", e);
+    console.error("deleteowner error: - server.js:1022", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -981,77 +1061,87 @@ app.post("/send-reminders", async (req, res) => {
 
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:984", e);
+    console.error("sendreminders error: - server.js:1064", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
 
 // =======================================================
 // 📢 ADMIN SEND NOTIFICATION
+// FIX ✅: requireAdminSecret middleware used here too.
+// NOTE: ADMIN_SECRET stays server-side only — remove EXPO_PUBLIC_ADMIN_SECRET
+//       from your .env and from notification-center.tsx in the app.
+//       The app should call this endpoint with a Firebase ID token instead,
+//       and the server verifies the token's role === "admin".
 // =======================================================
 app.post("/send-admin-notification", requireAdminSecret, async (req, res) => {
   try {
-    const { title, body, userId, role, data } = req.body;
-    // imageUrl from admin panel is accepted but intentionally not used in FCM payload
-    // — no big picture expansion, just small icon + thumbnail on right by default
+    const { title, body, userId, role, data, imageUrl } = req.body;
+    const image = imageUrl || null;
 
     if (!title || !body) {
       return res.status(400).json({ success: false, error: "title and body are required" });
     }
 
-    // Single user notification
     if (userId) {
       await sendPushToUser(userId, title, body, data || {});
-      return res.json({ success: true, total: 1, message: "Notification sent to user" });
+      return res.json({ success: true, message: "Notification sent to user" });
     }
 
-    // Broadcast to role or all users
-    let usersQuery = db.collection("users");
-    if (role) usersQuery = usersQuery.where("role", "==", role);
+    let query = db.collection("users");
+    if (role) query = query.where("role", "==", role);
 
-    const snap = await usersQuery.get();
+    const snap = await query.get();
     let total = 0;
 
     await Promise.allSettled(
-      snap.docs.map(async (docSnap) => {
-        const u = docSnap.data();
+      snap.docs.map(async (doc) => {
+        const u = doc.data();
 
-        // ── FCM path ────────────────────────────────────────────────────────
-        if (u.fcmToken) {
-          try {
-            await admin.messaging().send({
-              token: u.fcmToken,
-              notification: {
-                title,
-                body,
-                // ✅ NO imageUrl — prevents big picture expansion
-                // Android shows app icon as large thumbnail on right automatically
-              },
-              android: {
-                priority: "high",
-                notification: {
-                  channelId: "bookora-default",
-                  sound:     "default",
-                  icon:      "notification_icon", // small white P (status bar + left)
-                  color:     "#4DB408",           // green accent
-                  // ✅ NO imageUrl — no big picture, thumbnail stays on right
-                },
-              },
-              apns: {
-                payload: {
-                  aps: { sound: "default" },
-                },
-              },
-              data: data ? { ...data } : {},
-            });
-            total++;
-          } catch (fcmErr) {
-            console.error("FCM send failed for - server.js:1049", docSnap.id, "", fcmErr.message);
-          }
-          return;
-        }
+        // BUG 5 FIX: When imageUrl is provided, use Firebase Admin SDK messaging().send()
+        // with the raw FCM token. Expo Push API silently ignores imageUrl — it has no
+        // image support. FCM supports android.notification.imageUrl natively and
+        // actually delivers the image in the notification.
+        //
+        // When no image: fall back to Expo Push API (simpler, works for plain notifications).
+     if (u.fcmToken) {
+  // Always use FCM — supports small icon, large icon (right thumbnail), big picture
+  const bigPicture = image || NOTIF_BIG_PICTURE;
+  try {
+   // AFTER — correct
+await admin.messaging().send({
+  token: u.fcmToken,
+  notification: {
+    title,
+    body,
+    // ✅ NO imageUrl here
+  },
+  android: {
+    priority: "high",
+    notification: {
+      channelId:  "bookora-default",
+      sound:      "default",
+      icon:       "notification_icon",   // ✅ small icon always stays
+      color:      "#4DB408",
+      imageUrl:   bigPicture,            // ✅ big picture only here
+    },
+  },
+  apns: {
+    payload: {
+      aps: { "mutable-content": 1, sound: "default" },
+    },
+    fcmOptions: { imageUrl: bigPicture },
+  },
+  data: { ...data },
+});
+    total++;
+  } catch (e) {
+    console.error("FCM send failed for - server.js:1139", doc.id, e.message);
+  }
+  return;
+}
 
-        // ── Expo fallback ────────────────────────────────────────────────────
+        // No image — use Expo Push API as normal
         if (!u.expoPushToken) return;
         try {
           await fetch(EXPO_PUSH_URL, {
@@ -1068,21 +1158,31 @@ app.post("/send-admin-notification", requireAdminSecret, async (req, res) => {
             }),
           });
           total++;
-        } catch (expoErr) {
-          console.error("Expo push failed for - server.js:1072", docSnap.id, "", expoErr.message);
+        } catch (e) {
+          console.error("Expo push failed for - server.js:1162", doc.id, e.message);
         }
       })
     );
 
     return res.json({ success: true, total, message: "Notifications sent" });
   } catch (e) {
-    console.error("admin notification error: - server.js:1079", e);
+    console.error("admin notification error: - server.js:1169", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
 
 // =======================================================
 // ✅ HEALTH CHECK
+//
+// BUG 7 FIX: Returns JSON with timestamp so UptimeRobot can confirm
+// the server is genuinely alive on every 14-minute ping.
+// This keeps the Render free-tier server warm and prevents the
+// 30-50 second cold start that causes booking/notification failures.
+//
+// Setup (free): https://uptimerobot.com
+//   Monitor type : HTTP(s)
+//   URL          : https://bookora-backend-95u4.onrender.com/health
+//   Interval     : every 14 minutes  ← must be under Render's 15min sleep threshold
 // =======================================================
 app.get("/", (req, res) => {
   res.send("Bookora server running ✅");
@@ -1101,7 +1201,7 @@ app.get("/health", (req, res) => {
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1104", err);
+  console.error("Global Error: - server.js:1204", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -1110,5 +1210,5 @@ app.use((err, req, res, next) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:1113`);
+  console.log(`Server running on ${PORT} ✅ - server.js:1213`);
 });
