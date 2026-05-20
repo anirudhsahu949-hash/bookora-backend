@@ -104,9 +104,9 @@ const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 
 // ─── Playon notification image constants ──────────────────────────────────────
 const NOTIF_LARGE_ICON =
-  "https://github.com/anirudhsahu949-hash/turf-images/blob/main/playon-logo/splash-v10.png?raw=true";
+  "https://github.com/anirudhsahu949-hash/turf-images/blob/main/playon-logo/playon-v7.png?raw=true";
 const NOTIF_BIG_PICTURE =
-  "https://github.com/anirudhsahu949-hash/turf-images/blob/main/playon-logo/p-notification-v1.png?raw=true";
+  "https://github.com/anirudhsahu949-hash/turf-images/blob/main/playon-logo/playon-v7.png?raw=true";
 
 async function sendPushToUser(userId, title, body, data = {}, imageUrl = null) {
   try {
@@ -119,37 +119,36 @@ async function sendPushToUser(userId, title, body, data = {}, imageUrl = null) {
     if (u.fcmToken) {
       const bigPicture = imageUrl || NOTIF_BIG_PICTURE;
       try {
-        await admin.messaging().send({
-          token: u.fcmToken,
-          notification: {
-            title,
-            body,
-            imageUrl: bigPicture,       // big picture when expanded
-          },
-          android: {
-            priority: "high",
-            notification: {
-              channelId:  "bookora-default",
-              sound:      "default",
-              // Small icon = white P silhouette (from app.json drawable)
-              icon:       "notification_icon",
-              color:      "#4DB408",
-              // Large icon = Playon white logo (thumbnail on RIGHT of notification)
-              imageUrl:   bigPicture,   // big picture (expanded view)
-            },
-          },
-          apns: {
-            payload: {
-              aps: { "mutable-content": 1, sound: "default" },
-            },
-            fcmOptions: { imageUrl: bigPicture },
-          },
-          data: { ...data },
-        });
-        console.log(`FCM push sent to ${userId} - server.js:149`);
+     // AFTER — correct
+await admin.messaging().send({
+  token: u.fcmToken,
+  // ✅ NO imageUrl here at top level — keeps small icon safe
+  notification: {
+    title,
+    body,
+  },
+  android: {
+    priority: "high",
+    notification: {
+      channelId:  "bookora-default",
+      sound:      "default",
+      icon:       "notification_icon",   // ✅ small icon always stays
+      color:      "#4DB408",
+      imageUrl:   bigPicture,            // ✅ big picture only in android block
+    },
+  },
+  apns: {
+    payload: {
+      aps: { "mutable-content": 1, sound: "default" },
+    },
+    fcmOptions: { imageUrl: bigPicture }, // iOS only
+  },
+  data: data || {},
+});
+        console.log(`FCM push sent to ${userId} - server.js:148`);
         return;
       } catch (fcmErr) {
-        console.warn("FCM send failed, falling back to Expo: - server.js:152", fcmErr.message);
+        console.warn("FCM send failed, falling back to Expo: - server.js:151", fcmErr.message);
       }
     }
 
@@ -170,9 +169,9 @@ async function sendPushToUser(userId, title, body, data = {}, imageUrl = null) {
         priority:  "high",
       }),
     });
-    console.log(`Expo push sent to ${userId} - server.js:173`);
+    console.log(`Expo push sent to ${userId} - server.js:172`);
   } catch (e) {
-    console.error("sendPushToUser failed: - server.js:175", e.message);
+    console.error("sendPushToUser failed: - server.js:174", e.message);
   }
 }
 
@@ -298,7 +297,7 @@ async function requireAdminSecret(req, res, next) {
     req.adminUid = decoded.uid;
     next();
   } catch (e) {
-    console.error("requireAdminSecret auth error: - server.js:301", e.message);
+    console.error("requireAdminSecret auth error: - server.js:300", e.message);
     return res.status(401).json({ success: false, error: "Invalid or expired token" });
   }
 }
@@ -389,9 +388,9 @@ app.post("/create-order", orderLimiter, async (req, res) => {
 
     const remainingAmount = Math.max(totalAmount - advanceAmount, 0);
 
-    console.log("Booking Type: - server.js:392", finalBookingType);
-    console.log("Total Amount: - server.js:393", totalAmount);
-    console.log("Advance Amount: - server.js:394", advanceAmount);
+    console.log("Booking Type: - server.js:391", finalBookingType);
+    console.log("Total Amount: - server.js:392", totalAmount);
+    console.log("Advance Amount: - server.js:393", advanceAmount);
 
     const order = await razorpay.orders.create({
       amount: advanceAmount * 100,
@@ -434,7 +433,7 @@ app.post("/create-order", orderLimiter, async (req, res) => {
       key: process.env.KEY_ID,
     });
   } catch (err) {
-    console.error("createorder error: - server.js:437", err);
+    console.error("createorder error: - server.js:436", err);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -603,7 +602,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
           userEmail = u.email || "";
         }
       } catch (e) {
-        console.warn("Could not fetch user for name enrichment: - server.js:606", e.message);
+        console.warn("Could not fetch user for name enrichment: - server.js:605", e.message);
       }
 
       // Update booking with actual user name (non-critical)
@@ -611,7 +610,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         db.collection("bookings")
           .doc(bookingId)
           .update({ userName, userPhone, userEmail })
-          .catch((e) => console.warn("Name update failed: - server.js:614", e.message));
+          .catch((e) => console.warn("Name update failed: - server.js:613", e.message));
       }
     }
 
@@ -630,7 +629,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
 
       await Promise.all(deletePromises);
     } catch (e) {
-      console.warn("Lock cleanup failed (noncritical): - server.js:633", e.message);
+      console.warn("Lock cleanup failed (noncritical): - server.js:632", e.message);
     }
 
     // Push notifications (non-blocking)
@@ -656,7 +655,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
 
     return res.json({ success: true, bookingId });
   } catch (err) {
-    console.error("verifypayment error: - server.js:659", err);
+    console.error("verifypayment error: - server.js:658", err);
 
     // Mark order failed (best effort)
     try {
@@ -671,7 +670,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         }
       }
     } catch (e) {
-      console.warn("Failed order update: - server.js:674", e.message);
+      console.warn("Failed order update: - server.js:673", e.message);
     }
 
     return res.status(500).json({
@@ -794,7 +793,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
 
       await Promise.all(lockDeletePromises);
     } catch (e) {
-      console.warn("Lock cleanup on cancel failed: - server.js:797", e.message);
+      console.warn("Lock cleanup on cancel failed: - server.js:796", e.message);
     }
 
     // Razorpay refund
@@ -815,9 +814,9 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
           refundStatus: "initiated",
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
-        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:818`);
+        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:817`);
       } catch (refundError) {
-        console.error("Razorpay refund error: - server.js:820", refundError.message);
+        console.error("Razorpay refund error: - server.js:819", refundError.message);
         await bookingRef.update({
           refundStatus: "failed",
           refundError: refundError.message,
@@ -858,7 +857,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
           : "Booking cancelled successfully.",
     });
   } catch (err) {
-    console.error("cancelbooking error: - server.js:861", err);
+    console.error("cancelbooking error: - server.js:860", err);
     return res.status(500).json({
       success: false,
       error: err.message || "Cancellation failed. Please try again.",
@@ -910,7 +909,7 @@ app.get("/refund-status/:bookingId", refundStatusLimiter, async (req, res) => {
       refundAmount: booking.refundAmount || 0,
     });
   } catch (err) {
-    console.error("refundstatus error: - server.js:913", err);
+    console.error("refundstatus error: - server.js:912", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -993,7 +992,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" })
       );
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:996`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:995`);
     }
 
     // Unlink operators
@@ -1008,7 +1007,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
         batch.update(d.ref, { ownerId: null, turfId: null, turfName: "", status: "inactive" })
       );
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1011`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1010`);
     }
 
     await admin.auth().deleteUser(uid);
@@ -1020,7 +1019,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:1023", e);
+    console.error("deleteowner error: - server.js:1022", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1062,7 +1061,7 @@ app.post("/send-reminders", async (req, res) => {
 
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1065", e);
+    console.error("sendreminders error: - server.js:1064", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1109,31 +1108,32 @@ app.post("/send-admin-notification", requireAdminSecret, async (req, res) => {
   // Always use FCM — supports small icon, large icon (right thumbnail), big picture
   const bigPicture = image || NOTIF_BIG_PICTURE;
   try {
-    await admin.messaging().send({
-      token: u.fcmToken,
-      notification: {
-        title,
-        body,
-        imageUrl: bigPicture,          // big picture (expanded)
-      },
-      android: {
-        priority: "high",
-        notification: {
-          channelId:  "bookora-default",
-          sound:      "default",
-          icon:       "notification_icon",   // small icon — white P in status bar
-          color:      "#4DB408",             // green accent
-          imageUrl:   bigPicture,            // big picture (expanded)
-        },
-      },
-      apns: {
-        payload: {
-          aps: { "mutable-content": 1, sound: "default" },
-        },
-        fcmOptions: { imageUrl: bigPicture },
-      },
-      data: data || {},
-    });
+   // AFTER — correct
+await admin.messaging().send({
+  token: u.fcmToken,
+  notification: {
+    title,
+    body,
+    // ✅ NO imageUrl here
+  },
+  android: {
+    priority: "high",
+    notification: {
+      channelId:  "bookora-default",
+      sound:      "default",
+      icon:       "notification_icon",   // ✅ small icon always stays
+      color:      "#4DB408",
+      imageUrl:   bigPicture,            // ✅ big picture only here
+    },
+  },
+  apns: {
+    payload: {
+      aps: { "mutable-content": 1, sound: "default" },
+    },
+    fcmOptions: { imageUrl: bigPicture },
+  },
+  data: { ...data },
+});
     total++;
   } catch (e) {
     console.error("FCM send failed for - server.js:1139", doc.id, e.message);
