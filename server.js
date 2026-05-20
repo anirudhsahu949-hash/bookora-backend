@@ -134,7 +134,7 @@ await admin.messaging().send({
       sound:      "default",
       icon:       "notification_icon",   // ✅ small icon always stays
       color:      "#4DB408",
-      imageUrl:   bigPicture,            // ✅ big picture only in android block
+       // ✅ big picture only in android block
     },
   },
   apns: {
