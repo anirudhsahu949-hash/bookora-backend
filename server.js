@@ -1117,15 +1117,16 @@ if (u.fcmToken) {
         // ✅ NO imageUrl at top level — keeps small icon safe
       },
       android: {
-        priority: "high",
-        notification: {
-          channelId: "bookora-default",
-          sound:     "default",
-          icon:      "notification_icon",  // small white P (status bar)
-          color:     "#4DB408",
-          // ✅ NO imageUrl — no big picture, thumbnail stays on right
-        },
-      },
+  priority: "high",
+  notification: {
+    channelId: "bookora-default",
+    sound:     "default",
+    icon:      "notification_icon",  // small white P in status bar
+    color:     "#4DB408",
+    // largeIcon = big round icon on LEFT (like Jio shows)
+    imageUrl: "https://github.com/anirudhsahu949-hash/turf-images/blob/main/playon-logo/splash-v10.png?raw=true",
+  },
+},
       apns: {
         payload: {
           aps: { sound: "default" },
@@ -1140,7 +1141,7 @@ if (u.fcmToken) {
     return; // ✅ success — skip Expo fallback
   } catch (fcmErr) {
     // FCM failed — fall through to Expo fallback below
-    console.warn("FCM failed for - server.js:1143", doc.id, "", fcmErr.message);
+    console.warn("FCM failed for - server.js:1144", doc.id, "", fcmErr.message);
   }
 }
 
@@ -1162,7 +1163,7 @@ try {
   });
   total++;
 } catch (expoErr) {
-  console.error("Expo push failed for - server.js:1165", doc.id, "", expoErr.message);
+  console.error("Expo push failed for - server.js:1166", doc.id, "", expoErr.message);
 }
 
         // No image — use Expo Push API as normal
@@ -1183,14 +1184,14 @@ try {
           });
           total++;
         } catch (e) {
-          console.error("Expo push failed for - server.js:1186", doc.id, e.message);
+          console.error("Expo push failed for - server.js:1187", doc.id, e.message);
         }
       })
     );
 
     return res.json({ success: true, total, message: "Notifications sent" });
   } catch (e) {
-    console.error("admin notification error: - server.js:1193", e);
+    console.error("admin notification error: - server.js:1194", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1225,7 +1226,7 @@ app.get("/health", (req, res) => {
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1228", err);
+  console.error("Global Error: - server.js:1229", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -1234,5 +1235,5 @@ app.use((err, req, res, next) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:1237`);
+  console.log(`Server running on ${PORT} ✅ - server.js:1238`);
 });
