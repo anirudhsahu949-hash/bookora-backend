@@ -104,9 +104,9 @@ const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 
 // ─── Playon notification image constants ──────────────────────────────────────
 const NOTIF_LARGE_ICON =
-  "https://github.com/anirudhsahu949-hash/turf-images/blob/main/playon-logo/p-notification-v1.png?raw=true";
+  "https://github.com/anirudhsahu949-hash/turf-images/blob/main/playon-logo/playon-v7.png?raw=true";
 const NOTIF_BIG_PICTURE =
-  "https://github.com/anirudhsahu949-hash/turf-images/blob/main/playon-logo/p-notification-v1.png?raw=true";
+  "https://github.com/anirudhsahu949-hash/turf-images/blob/main/playon-logo/playon-v7.png?raw=true";
 
 async function sendPushToUser(userId, title, body, data = {}, imageUrl = null) {
   try {
@@ -134,14 +134,14 @@ await admin.messaging().send({
       sound:      "default",
       icon:       "notification_icon",   // ✅ small icon always stays
       color:      "#4DB408",
-       imageUrl:bigPicture,  // ✅ big picture only in android block
+     //  imageUrl:bigPicture,  // ✅ big picture only in android block
     },
   },
   apns: {
     payload: {
       aps: { "mutable-content": 1, sound: "default" },
     },
-    fcmOptions: { imageUrl: bigPicture }, // iOS only
+  //  fcmOptions: { imageUrl: bigPicture }, // iOS only
   },
   data: data || {},
 });
