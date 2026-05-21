@@ -765,7 +765,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
       cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
       cancelledBy: "user",
       cancellationReason: reason || "User requested cancellation",
-      refundStatus: wasOnlinePayment ? "pending" : "not_applicable",
+      refundStatus: wasOnlinePayment ? "received" : "not_applicable",
       refundAmount,
       ownerSettlementStatus: "cancelled",
     });
@@ -880,28 +880,35 @@ app.get("/refund-status/:bookingId", refundStatusLimiter, async (req, res) => {
     }
 
     if (booking.refundId) {
-      try {
-        const refund = await razorpay.payments.fetchRefund(booking.paymentId, booking.refundId);
-        // In /refund-status endpoint, after: const refund = await razorpay.payments.fetchRefund(...)
-if (refund.status === "processed") {
-  // Update Firestore so it's correct next time — no need to call Razorpay again
-  await db.collection("bookings").doc(bookingId).update({
-    refundStatus: "processed",
-    refundProcessedAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
-}
-return res.json({
-  success: true,
-  refundId: refund.id,
-  refundStatus: refund.status,  // "processed"
-  refundAmount: refund.amount / 100,
-  processedAt: refund.created_at,
-});
-       
-      } catch (e) {
-        // Fall through to Firestore data
-      }
+  try {
+    const refund = await razorpay.payments.fetchRefund(
+      booking.paymentId,
+      booking.refundId
+    );
+
+    let simplifiedStatus = "initiated";
+
+    if (refund.status === "processed") {
+      simplifiedStatus = "processed";
+
+      await db.collection("bookings").doc(bookingId).update({
+        refundStatus: "processed",
+        refundProcessedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
     }
+
+    return res.json({
+      success: true,
+      refundId: refund.id,
+      refundStatus: simplifiedStatus,
+      refundAmount: refund.amount / 100,
+      message:
+        simplifiedStatus === "processed"
+          ? "Refund process completed. Amount usually reflects in your bank account within 4-5 business days."
+          : "Refund has been initiated and is being processed.",
+    });
+  } catch (e) {}
+}
 
     return res.json({
       success: true,
@@ -910,7 +917,7 @@ return res.json({
       refundAmount: booking.refundAmount || 0,
     });
   } catch (err) {
-    console.error("refundstatus error: - server.js:913", err);
+    console.error("refundstatus error: - server.js:920", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -993,7 +1000,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" })
       );
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:996`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1003`);
     }
 
     // Unlink operators
@@ -1008,7 +1015,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
         batch.update(d.ref, { ownerId: null, turfId: null, turfName: "", status: "inactive" })
       );
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1011`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1018`);
     }
 
     await admin.auth().deleteUser(uid);
@@ -1020,7 +1027,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:1023", e);
+    console.error("deleteowner error: - server.js:1030", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1062,7 +1069,7 @@ app.post("/send-reminders", async (req, res) => {
 
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1065", e);
+    console.error("sendreminders error: - server.js:1072", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1135,7 +1142,7 @@ if (u.fcmToken) {
     total++;
     return;
   } catch (fcmErr) {
-    console.warn("FCM failed for - server.js:1138", doc.id, "", fcmErr.message);
+    console.warn("FCM failed for - server.js:1145", doc.id, "", fcmErr.message);
   }
 }
 
@@ -1157,35 +1164,17 @@ try {
   });
   total++;
 } catch (expoErr) {
-  console.error("Expo push failed for - server.js:1160", doc.id, "", expoErr.message);
+  console.error("Expo push failed for - server.js:1167", doc.id, "", expoErr.message);
 }
 
         // No image — use Expo Push API as normal
-        if (!u.expoPushToken) return;
-        try {
-          await fetch(EXPO_PUSH_URL, {
-            method: "POST",
-            headers: { Accept: "application/json", "Content-Type": "application/json" },
-            body: JSON.stringify({
-              to:        u.expoPushToken,
-              sound:     "default",
-              title,
-              body,
-              data:      data || {},
-              channelId: "bookora-default",
-              priority:  "high",
-            }),
-          });
-          total++;
-        } catch (e) {
-          console.error("Expo push failed for - server.js:1181", doc.id, e.message);
-        }
+        
       })
     );
 
     return res.json({ success: true, total, message: "Notifications sent" });
   } catch (e) {
-    console.error("admin notification error: - server.js:1188", e);
+    console.error("admin notification error: - server.js:1177", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1220,7 +1209,7 @@ app.get("/health", (req, res) => {
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1223", err);
+  console.error("Global Error: - server.js:1212", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -1229,5 +1218,5 @@ app.use((err, req, res, next) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:1232`);
+  console.log(`Server running on ${PORT} ✅ - server.js:1221`);
 });
