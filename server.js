@@ -882,13 +882,22 @@ app.get("/refund-status/:bookingId", refundStatusLimiter, async (req, res) => {
     if (booking.refundId) {
       try {
         const refund = await razorpay.payments.fetchRefund(booking.paymentId, booking.refundId);
-        return res.json({
-          success: true,
-          refundId: refund.id,
-          refundStatus: refund.status,
-          refundAmount: refund.amount / 100,
-          processedAt: refund.created_at,
-        });
+        // In /refund-status endpoint, after: const refund = await razorpay.payments.fetchRefund(...)
+if (refund.status === "processed") {
+  // Update Firestore so it's correct next time — no need to call Razorpay again
+  await db.collection("bookings").doc(bookingId).update({
+    refundStatus: "processed",
+    refundProcessedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+}
+return res.json({
+  success: true,
+  refundId: refund.id,
+  refundStatus: refund.status,  // "processed"
+  refundAmount: refund.amount / 100,
+  processedAt: refund.created_at,
+});
+       
       } catch (e) {
         // Fall through to Firestore data
       }
@@ -901,7 +910,7 @@ app.get("/refund-status/:bookingId", refundStatusLimiter, async (req, res) => {
       refundAmount: booking.refundAmount || 0,
     });
   } catch (err) {
-    console.error("refundstatus error: - server.js:904", err);
+    console.error("refundstatus error: - server.js:913", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -984,7 +993,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" })
       );
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:987`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:996`);
     }
 
     // Unlink operators
@@ -999,7 +1008,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
         batch.update(d.ref, { ownerId: null, turfId: null, turfName: "", status: "inactive" })
       );
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1002`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1011`);
     }
 
     await admin.auth().deleteUser(uid);
@@ -1011,7 +1020,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminSecret, async (
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:1014", e);
+    console.error("deleteowner error: - server.js:1023", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1053,7 +1062,7 @@ app.post("/send-reminders", async (req, res) => {
 
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1056", e);
+    console.error("sendreminders error: - server.js:1065", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1126,7 +1135,7 @@ if (u.fcmToken) {
     total++;
     return;
   } catch (fcmErr) {
-    console.warn("FCM failed for - server.js:1129", doc.id, "", fcmErr.message);
+    console.warn("FCM failed for - server.js:1138", doc.id, "", fcmErr.message);
   }
 }
 
@@ -1148,7 +1157,7 @@ try {
   });
   total++;
 } catch (expoErr) {
-  console.error("Expo push failed for - server.js:1151", doc.id, "", expoErr.message);
+  console.error("Expo push failed for - server.js:1160", doc.id, "", expoErr.message);
 }
 
         // No image — use Expo Push API as normal
@@ -1169,14 +1178,14 @@ try {
           });
           total++;
         } catch (e) {
-          console.error("Expo push failed for - server.js:1172", doc.id, e.message);
+          console.error("Expo push failed for - server.js:1181", doc.id, e.message);
         }
       })
     );
 
     return res.json({ success: true, total, message: "Notifications sent" });
   } catch (e) {
-    console.error("admin notification error: - server.js:1179", e);
+    console.error("admin notification error: - server.js:1188", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1211,7 +1220,7 @@ app.get("/health", (req, res) => {
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1214", err);
+  console.error("Global Error: - server.js:1223", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -1220,5 +1229,5 @@ app.use((err, req, res, next) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:1223`);
+  console.log(`Server running on ${PORT} ✅ - server.js:1232`);
 });
