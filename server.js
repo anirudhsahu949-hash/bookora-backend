@@ -943,7 +943,7 @@ app.post("/create-operator", adminActionLimiter, requireAdminOrOwner, async (req
 // 🗑️ DELETE OWNER
 // FIX ✅: requireAdminSecret middleware added.
 // =======================================================
-app.delete("/delete-owner/:uid", aadminActionLimiter, requireAdminOrOwner, async (req, res) => {
+app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async (req, res) => {
   try {
     const { uid } = req.params;
 
