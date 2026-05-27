@@ -889,7 +889,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
       error: err.message || "Verification failed",
     });
   }
-});
+}); 
 
 // =======================================================
 // ✅ CANCEL BOOKING
