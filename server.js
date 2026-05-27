@@ -585,10 +585,12 @@ const remainingAmount = Math.max(totalAmount - advanceAmount - promoDiscount, 0)
 // =======================================================
 app.post("/verify-payment", verifyLimiter, async (req, res) => {
   let order_id = null;
+  let payment_id_outer = null;
 
   try {
     const { order_id: incomingOrderId, payment_id, signature } = req.body;
     order_id = incomingOrderId;
+    payment_id_outer = payment_id;
 
     if (!order_id || !payment_id || !signature) {
       return res.status(400).json({ success: false, error: "Missing fields" });
@@ -604,7 +606,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
       return res.status(400).json({ success: false, error: "Invalid signature" });
     }
 
-    // Verify payment captured at Razorpay before touching Firestore
+    // Verify payment captured at Razorpay
     const payment = await razorpay.payments.fetch(payment_id);
     if (payment.status !== "captured") {
       return res.status(400).json({ success: false, error: "Payment not captured" });
@@ -612,7 +614,6 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
 
     const orderRef = db.collection("orders").doc(order_id);
 
-    // ── TRANSACTION: idempotent booking creation ──────────────────────────────
     let bookingId = null;
     let orderData = null;
     let alreadyPaid = false;
@@ -626,17 +627,15 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
 
       orderData = orderDoc.data();
 
-      // Idempotency: already processed → return early
+      // Idempotency check
       if (orderData.orderStatus === "paid") {
         alreadyPaid = true;
         return;
       }
 
-      // Double-booking check INSIDE the transaction
-      // Read all existing bookings for this turf+date
+      // ── Check 1: existing online bookings ──────────────────────────────────
       const existingSnap = await txn.get(
-        db
-          .collection("bookings")
+        db.collection("bookings")
           .where("turfId", "==", orderData.turfId)
           .where("dateString", "==", orderData.dateString)
       );
@@ -647,16 +646,30 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         .flatMap((b) => b.selectedSlots || []);
 
       for (const slot of orderData.slots) {
-        if (existingSlots.includes(slot)) {
-          throw new Error(`Slot already booked: ${slot}`);
+        if (existingSlots.map(s => String(s).trim()).includes(String(slot).trim())) {
+          throw new Error(`SLOT_CONFLICT: Slot already booked: ${slot}`);
         }
       }
 
-      // Fetch user info (outside transaction is fine — user doc rarely changes)
-      // We do it after the conflict check to avoid wasted reads on conflict
+      // ── Check 2: owner blocked slots ───────────────────────────────────────
+      const blockedSnap = await txn.get(
+        db.collection("blockedSlots")
+          .where("turfId", "==", orderData.turfId)
+          .where("date", "==", orderData.dateString)
+      );
+
+      const blockedSlotsList = blockedSnap.docs
+        .flatMap((d) => d.data().slots || []);
+
+      for (const slot of orderData.slots) {
+        if (blockedSlotsList.map(s => String(s).trim()).includes(String(slot).trim())) {
+          throw new Error(`SLOT_CONFLICT: Slot blocked by owner: ${slot}`);
+        }
+      }
+
+      // ── All clear — create booking ─────────────────────────────────────────
       bookingId = `${orderData.turfId}_${Date.now()}`;
       const bookingRef = db.collection("bookings").doc(bookingId);
-
       const paymentStatus = orderData.bookingType === "full" ? "fully_paid" : "advance_paid";
 
       const parsedDate = new Date(orderData.dateString);
@@ -664,63 +677,69 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         isNaN(parsedDate.getTime()) ? new Date() : parsedDate
       );
 
-      // Write booking
       txn.set(bookingRef, {
-        bookingType: orderData.bookingType || "advance",
-        paymentMode: orderData.paymentMode || "advance_payment",
-        turfId: orderData.turfId,
-        turfName: orderData.turfName,
-        turfLocation: orderData.turfLocation,
-        image: orderData.image,
-        ownerId: orderData.ownerId,
-        ownerName: orderData.ownerName,
-        mapLink: orderData.mapLink,
-        userId: orderData.userId || null,
-        userName: "",    // filled below after transaction
-        userPhone: "",
-        userEmail: "",
-        date: bookingDate,
-        dateString: orderData.dateString,
-        selectedSlots: orderData.slots,
-        paymentId: payment_id,
-        orderId: order_id,
-        totalAmount: orderData.totalAmount,
-        paidAmount: orderData.paidAmount,
-        advanceAmount: orderData.advanceAmount,
-        remainingAmount: orderData.remainingAmount,
-        status: "confirmed",
+        bookingType:         orderData.bookingType || "advance",
+        paymentMode:         orderData.paymentMode || "advance_payment",
+        turfId:              orderData.turfId,
+        turfName:            orderData.turfName,
+        turfLocation:        orderData.turfLocation,
+        image:               orderData.image,
+        ownerId:             orderData.ownerId,
+        ownerName:           orderData.ownerName,
+        mapLink:             orderData.mapLink,
+        userId:              orderData.userId || null,
+        userName:            "",
+        userPhone:           "",
+        userEmail:           "",
+        date:                bookingDate,
+        dateString:          orderData.dateString,
+        selectedSlots:       orderData.slots,
+        paymentId:           payment_id,
+        orderId:             order_id,
+        totalAmount:         orderData.totalAmount,
+        paidAmount:          orderData.paidAmount,
+        advanceAmount:       orderData.advanceAmount,
+        remainingAmount:     orderData.remainingAmount,
+        status:              "confirmed",
         paymentStatus,
-        verificationStatus: "verified",
+        verificationStatus:  "verified",
         ownerSettlementStatus: "pending",
-        refundStatus: "not_applicable",
-        refundAmount: 0,
-      cancelledAt:       null,
-        cancelledBy:       null,
-        cancellationReason: null,
-        promoId:           orderData.promoId    || null,
-        promoCode:         orderData.promoCode  || null,
-        discount:          orderData.discount   || 0,
-        createdAt:         admin.firestore.FieldValue.serverTimestamp(),
+        refundStatus:        "not_applicable",
+        refundAmount:        0,
+        cancelledAt:         null,
+        cancelledBy:         null,
+        cancellationReason:  null,
+        promoId:             orderData.promoId   || null,
+        promoCode:           orderData.promoCode || null,
+        discount:            orderData.discount  || 0,
+        createdAt:           admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      // Mark order paid
       txn.update(orderRef, {
-        orderStatus: "paid",
-        paymentId: payment_id,
+        orderStatus:         "paid",
+        paymentId:           payment_id,
         paymentStatus,
-        verificationStatus: "verified",
-        paidAt: admin.firestore.FieldValue.serverTimestamp(),
+        verificationStatus:  "verified",
+        paidAt:              admin.firestore.FieldValue.serverTimestamp(),
       });
     });
 
-    // Already paid on a previous request — just return success
+    // Already paid on a previous request
     if (alreadyPaid) {
-      return res.json({ success: true, bookingId: null });
+      // Find the existing bookingId and return it
+      try {
+        const existingBooking = await db.collection("bookings")
+          .where("orderId", "==", order_id)
+          .limit(1)
+          .get();
+        const existingId = existingBooking.empty ? null : existingBooking.docs[0].id;
+        return res.json({ success: true, bookingId: existingId });
+      } catch {
+        return res.json({ success: true, bookingId: null });
+      }
     }
 
-    // ── Post-transaction: fill in user name + clean up locks ─────────────────
-    // These don't need to be atomic — they're best-effort enrichment.
-
+    // ── Post-transaction: user info, locks, promo, notifications ─────────────
     let userName = "";
     let userPhone = "";
     let userEmail = "";
@@ -730,42 +749,39 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         const userDoc = await db.collection("users").doc(orderData.userId).get();
         if (userDoc.exists) {
           const u = userDoc.data();
-          userName = u.name || "";
+          userName  = u.name  || "";
           userPhone = u.phone || "";
           userEmail = u.email || "";
         }
       } catch (e) {
-        console.warn("Could not fetch user for name enrichment: - server.js:738", e.message);
+        console.warn("Could not fetch user: - server.js:757", e.message);
       }
 
-      // Update booking with actual user name (non-critical)
       if (userName && bookingId) {
-        db.collection("bookings")
-          .doc(bookingId)
+        db.collection("bookings").doc(bookingId)
           .update({ userName, userPhone, userEmail })
-          .catch((e) => console.warn("Name update failed: - server.js:746", e.message));
+          .catch((e) => console.warn("Name update failed: - server.js:763", e.message));
       }
     }
 
     // Delete slot locks
     try {
-      const lockSnap = await db
-        .collection("slotLocks")
-        .where("turfId", "==", orderData.turfId)
+      const lockSnap = await db.collection("slotLocks")
+        .where("turfId",     "==", orderData.turfId)
         .where("dateString", "==", orderData.dateString)
-        .where("userId", "==", orderData.userId)
+        .where("userId",     "==", orderData.userId)
         .get();
 
       const deletePromises = lockSnap.docs
-        .filter((docSnap) => orderData.slots.includes(docSnap.data().slotTime))
-        .map((docSnap) => docSnap.ref.delete());
+        .filter((d) => orderData.slots.includes(d.data().slotTime))
+        .map((d) => d.ref.delete());
 
       await Promise.all(deletePromises);
     } catch (e) {
-      console.warn("Lock cleanup failed (noncritical): - server.js:765", e.message);
+      console.warn("Lock cleanup failed: - server.js:781", e.message);
     }
 
-    // ── Record promo usage ────────────────────────────────────────────────────
+    // Record promo usage
     if (orderData.promoId && bookingId) {
       try {
         await db.collection("promoUsage").add({
@@ -781,14 +797,13 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
           usedCount: admin.firestore.FieldValue.increment(1),
         });
       } catch (e) {
-        console.warn("Promo usage recording failed (noncritical): - server.js:784", e.message);
+        console.warn("Promo usage recording failed: - server.js:800", e.message);
       }
     }
 
-    // Push notifications (non-blocking)
+    // Notifications
     const slotSummary = getProfessionalSlotRange(orderData.slots);
-    const dateOnly =
-      orderData.dateString?.split(" ").slice(0, 3).join(" ") || orderData.dateString;
+    const dateOnly = orderData.dateString?.split(" ").slice(0, 3).join(" ") || orderData.dateString;
 
     sendPushToUser(
       orderData.userId,
@@ -807,23 +822,66 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
     }
 
     return res.json({ success: true, bookingId });
-  } catch (err) {
-    console.error("verifypayment error: - server.js:811", err);
 
-    // Mark order failed (best effort)
+  } catch (err) {
+    console.error("verifypayment error: - server.js:827", err);
+
+    // ── AUTO REFUND if slot conflict after payment was captured ───────────────
+    if (err.message?.startsWith("SLOT_CONFLICT") && payment_id_outer) {
+      try {
+        const payment = await razorpay.payments.fetch(payment_id_outer);
+        if (payment.status === "captured") {
+          const refund = await razorpay.payments.refund(payment_id_outer, {
+            amount: payment.amount, // full refund
+            notes: { reason: err.message },
+            speed: "normal",
+          });
+          console.log("Autorefund initiated: - server.js:839", refund.id);
+
+          // Mark order as refunded
+          if (order_id) {
+            await db.collection("orders").doc(order_id).update({
+              orderStatus:    "refunded",
+              paymentStatus:  "refunded",
+              refundId:       refund.id,
+              refundReason:   err.message,
+              refundedAt:     admin.firestore.FieldValue.serverTimestamp(),
+            }).catch(() => {});
+          }
+
+          return res.status(409).json({
+            success:      false,
+            error:        err.message.replace("SLOT_CONFLICT: ", ""),
+            autoRefunded: true,
+            refundId:     refund.id,
+            message:      "This slot is no longer available. Your payment has been refunded automatically. It will reflect in 5–7 business days.",
+          });
+        }
+      } catch (refundErr) {
+        console.error("Autorefund failed: - server.js:861", refundErr.message);
+        return res.status(409).json({
+          success:      false,
+          error:        err.message.replace("SLOT_CONFLICT: ", ""),
+          autoRefunded: false,
+          message:      "Slot unavailable. Refund could not be processed automatically — please contact support.",
+        });
+      }
+    }
+
+    // Mark order failed for non-conflict errors
     try {
       if (order_id) {
         const orderDoc = await db.collection("orders").doc(order_id).get();
         if (orderDoc.exists && orderDoc.data().orderStatus !== "paid") {
           await db.collection("orders").doc(order_id).update({
-            orderStatus: "failed",
+            orderStatus:  "failed",
             paymentStatus: "failed",
-            failedAt: admin.firestore.FieldValue.serverTimestamp(),
+            failedAt:     admin.firestore.FieldValue.serverTimestamp(),
           });
         }
       }
     } catch (e) {
-      console.warn("Failed order update: - server.js:826", e.message);
+      console.warn("Failed order update: - server.js:884", e.message);
     }
 
     return res.status(500).json({
@@ -946,7 +1004,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
 
       await Promise.all(lockDeletePromises);
     } catch (e) {
-      console.warn("Lock cleanup on cancel failed: - server.js:949", e.message);
+      console.warn("Lock cleanup on cancel failed: - server.js:1007", e.message);
     }
 
     // Razorpay refund
@@ -967,9 +1025,9 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
           refundStatus: "initiated",
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
-        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:970`);
+        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1028`);
       } catch (refundError) {
-        console.error("Razorpay refund error: - server.js:972", refundError.message);
+        console.error("Razorpay refund error: - server.js:1030", refundError.message);
         await bookingRef.update({
           refundStatus: "failed",
           refundError: refundError.message,
@@ -1010,7 +1068,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
           : "Booking cancelled successfully.",
     });
   } catch (err) {
-    console.error("cancelbooking error: - server.js:1013", err);
+    console.error("cancelbooking error: - server.js:1071", err);
     return res.status(500).json({
       success: false,
       error: err.message || "Cancellation failed. Please try again.",
@@ -1062,7 +1120,7 @@ app.get("/refund-status/:bookingId", refundStatusLimiter, async (req, res) => {
       refundAmount: booking.refundAmount || 0,
     });
   } catch (err) {
-    console.error("refundstatus error: - server.js:1065", err);
+    console.error("refundstatus error: - server.js:1123", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1170,7 +1228,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" })
       );
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1173`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1231`);
     }
 
     // Unlink operators
@@ -1185,7 +1243,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
         batch.update(d.ref, { ownerId: null, turfId: null, turfName: "", status: "inactive" })
       );
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1188`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1246`);
     }
 
     await admin.auth().deleteUser(uid);
@@ -1197,7 +1255,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:1200", e);
+    console.error("deleteowner error: - server.js:1258", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1239,7 +1297,7 @@ app.post("/send-reminders", async (req, res) => {
 
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1242", e);
+    console.error("sendreminders error: - server.js:1300", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1296,7 +1354,7 @@ app.post("/send-admin-notification", requireAdminSecret, async (req, res) => {
 
     return res.json({ success: true, total, message: "Notifications sent" });
   } catch (e) {
-    console.error("admin notification error: - server.js:1299", e);
+    console.error("admin notification error: - server.js:1357", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1312,7 +1370,7 @@ app.get("/", (req, res) => {
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1315", err);
+  console.error("Global Error: - server.js:1373", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -1321,5 +1379,5 @@ app.use((err, req, res, next) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:1324`);
+  console.log(`Server running on ${PORT} ✅ - server.js:1382`);
 });
