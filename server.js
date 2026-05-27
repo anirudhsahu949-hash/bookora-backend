@@ -335,6 +335,39 @@ app.post("/validate-promo", promoLimiter, async (req, res) => {
         error: `Minimum booking amount of ₹${promo.minBookingAmount} required for this promo`,
       });
     }
+    
+    // ── Time window check ──
+if (promo.validFromTime && promo.validToTime) {
+  const now = new Date();
+  const [fh, fm] = promo.validFromTime.split(":").map(Number);
+  const [th, tm] = promo.validToTime.split(":").map(Number);
+  const istOffset = 5 * 60 + 30; // IST is UTC+5:30
+const istNow = new Date(now.getTime() + istOffset * 60 * 1000);
+const currentMins = istNow.getUTCHours() * 60 + istNow.getUTCMinutes();
+  const fromMins    = fh * 60 + fm;
+  const toMins      = th * 60 + tm;
+  if (currentMins < fromMins || currentMins > toMins) {
+    return res.status(400).json({
+      success: false,
+      error: `This code is only valid between ${promo.validFromTime} and ${promo.validToTime}.`
+    });
+  }
+}
+
+// ── Day of week check ──
+if (promo.allowedDays && promo.allowedDays.length > 0) {
+  const istOffset = 5 * 60 + 30;
+const istNow = new Date(Date.now() + istOffset * 60 * 1000);
+const todayDay = istNow.getUTCDay();
+  if (!promo.allowedDays.includes(todayDay)) {
+    const names = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+    const allowed = promo.allowedDays.map(d => names[d]).join(", ");
+    return res.status(400).json({
+      success: false,
+      error: `This code is only valid on: ${allowed}.`
+    });
+  }
+}
  
     // ── Calculate discount ───────────────────────────────────────────────────
     // Discount applies ONLY on the online (Razorpay) amount
@@ -349,6 +382,7 @@ app.post("/validate-promo", promoLimiter, async (req, res) => {
         discount = Math.min(discount, promo.maxDiscount);
       }
     }
+    
  
     // Discount cannot exceed the online amount
     discount = Math.min(discount, onlineAmount);
@@ -368,7 +402,7 @@ app.post("/validate-promo", promoLimiter, async (req, res) => {
     });
  
   } catch (err) {
-    console.error("validatepromo error: - server.js:371", err);
+    console.error("validatepromo error: - server.js:405", err);
     return res.status(500).json({ success: false, error: err.message || "Validation failed" });
   }
 });
@@ -463,9 +497,9 @@ if (finalBookingType === "full") {
 
 const remainingAmount = Math.max(totalAmount - advanceAmount - promoDiscount, 0);
 
-    console.log("Booking Type: - server.js:466", finalBookingType);
-    console.log("Total Amount: - server.js:467", totalAmount);
-    console.log("Advance Amount: - server.js:468", advanceAmount);
+    console.log("Booking Type: - server.js:500", finalBookingType);
+    console.log("Total Amount: - server.js:501", totalAmount);
+    console.log("Advance Amount: - server.js:502", advanceAmount);
 
     const order = await razorpay.orders.create({
       amount: advanceAmount * 100,
@@ -511,7 +545,7 @@ const remainingAmount = Math.max(totalAmount - advanceAmount - promoDiscount, 0)
       key: process.env.KEY_ID,
     });
   } catch (err) {
-    console.error("createorder error: - server.js:514", err);
+    console.error("createorder error: - server.js:548", err);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -683,7 +717,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
           userEmail = u.email || "";
         }
       } catch (e) {
-        console.warn("Could not fetch user for name enrichment: - server.js:686", e.message);
+        console.warn("Could not fetch user for name enrichment: - server.js:720", e.message);
       }
 
       // Update booking with actual user name (non-critical)
@@ -691,7 +725,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         db.collection("bookings")
           .doc(bookingId)
           .update({ userName, userPhone, userEmail })
-          .catch((e) => console.warn("Name update failed: - server.js:694", e.message));
+          .catch((e) => console.warn("Name update failed: - server.js:728", e.message));
       }
     }
 
@@ -710,7 +744,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
 
       await Promise.all(deletePromises);
     } catch (e) {
-      console.warn("Lock cleanup failed (noncritical): - server.js:713", e.message);
+      console.warn("Lock cleanup failed (noncritical): - server.js:747", e.message);
     }
 
     // ── Record promo usage ────────────────────────────────────────────────────
@@ -729,7 +763,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
           usedCount: admin.firestore.FieldValue.increment(1),
         });
       } catch (e) {
-        console.warn("Promo usage recording failed (noncritical): - server.js:732", e.message);
+        console.warn("Promo usage recording failed (noncritical): - server.js:766", e.message);
       }
     }
 
@@ -756,7 +790,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
 
     return res.json({ success: true, bookingId });
   } catch (err) {
-    console.error("verifypayment error: - server.js:759", err);
+    console.error("verifypayment error: - server.js:793", err);
 
     // Mark order failed (best effort)
     try {
@@ -771,7 +805,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         }
       }
     } catch (e) {
-      console.warn("Failed order update: - server.js:774", e.message);
+      console.warn("Failed order update: - server.js:808", e.message);
     }
 
     return res.status(500).json({
@@ -894,7 +928,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
 
       await Promise.all(lockDeletePromises);
     } catch (e) {
-      console.warn("Lock cleanup on cancel failed: - server.js:897", e.message);
+      console.warn("Lock cleanup on cancel failed: - server.js:931", e.message);
     }
 
     // Razorpay refund
@@ -915,9 +949,9 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
           refundStatus: "initiated",
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
-        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:918`);
+        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:952`);
       } catch (refundError) {
-        console.error("Razorpay refund error: - server.js:920", refundError.message);
+        console.error("Razorpay refund error: - server.js:954", refundError.message);
         await bookingRef.update({
           refundStatus: "failed",
           refundError: refundError.message,
@@ -958,7 +992,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
           : "Booking cancelled successfully.",
     });
   } catch (err) {
-    console.error("cancelbooking error: - server.js:961", err);
+    console.error("cancelbooking error: - server.js:995", err);
     return res.status(500).json({
       success: false,
       error: err.message || "Cancellation failed. Please try again.",
@@ -1010,7 +1044,7 @@ app.get("/refund-status/:bookingId", refundStatusLimiter, async (req, res) => {
       refundAmount: booking.refundAmount || 0,
     });
   } catch (err) {
-    console.error("refundstatus error: - server.js:1013", err);
+    console.error("refundstatus error: - server.js:1047", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1118,7 +1152,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" })
       );
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1121`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1155`);
     }
 
     // Unlink operators
@@ -1133,7 +1167,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
         batch.update(d.ref, { ownerId: null, turfId: null, turfName: "", status: "inactive" })
       );
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1136`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1170`);
     }
 
     await admin.auth().deleteUser(uid);
@@ -1145,7 +1179,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:1148", e);
+    console.error("deleteowner error: - server.js:1182", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1187,7 +1221,7 @@ app.post("/send-reminders", async (req, res) => {
 
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1190", e);
+    console.error("sendreminders error: - server.js:1224", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1244,7 +1278,7 @@ app.post("/send-admin-notification", requireAdminSecret, async (req, res) => {
 
     return res.json({ success: true, total, message: "Notifications sent" });
   } catch (e) {
-    console.error("admin notification error: - server.js:1247", e);
+    console.error("admin notification error: - server.js:1281", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1260,7 +1294,7 @@ app.get("/", (req, res) => {
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1263", err);
+  console.error("Global Error: - server.js:1297", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -1269,5 +1303,5 @@ app.use((err, req, res, next) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:1272`);
+  console.log(`Server running on ${PORT} ✅ - server.js:1306`);
 });
