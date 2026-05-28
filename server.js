@@ -1310,7 +1310,7 @@ app.post("/send-reminders", async (req, res) => {
 //       The app should call this endpoint with a Firebase ID token instead,
 //       and the server verifies the token's role === "admin".
 // =======================================================
-app.post("/send-admin-notification", requireAdminSecret, async (req, res) => {
+app.post("/send-admin-notification", requireAdminOrOwner, async (req, res) => {
   try {
     const { title, body, userId, role, data, imageUrl } = req.body;
     const image = imageUrl || null;
