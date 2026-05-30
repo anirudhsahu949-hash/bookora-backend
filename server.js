@@ -497,7 +497,12 @@ const lockedByOthers = lockSnap.docs
 const taken = [...bookedSlots, ...blockedSlots, ...lockedByOthers].map((s) => String(s).trim());
 for (const slot of slots) {
   if (taken.includes(String(slot).trim())) {
-    return res.status(409).json({ error: `Slot no longer available: ${slot}`, slotConflict: true });
+    return res.status(409).json({
+      success: false,
+      slotConflict: true,
+      error: "This slot is no longer available.",
+      message: "Another user has already booked this slot or it has been blocked by the venue. Please select a different slot.",
+    });
   }
 }
 
@@ -545,9 +550,9 @@ if (finalBookingType === "full") {
 
 const remainingAmount = Math.max(totalAmount - advanceAmount - promoDiscount, 0);
 
-    console.log("Booking Type: - server.js:548", finalBookingType);
-    console.log("Total Amount: - server.js:549", totalAmount);
-    console.log("Advance Amount: - server.js:550", advanceAmount);
+    console.log("Booking Type: - server.js:553", finalBookingType);
+    console.log("Total Amount: - server.js:554", totalAmount);
+    console.log("Advance Amount: - server.js:555", advanceAmount);
 
     const order = await razorpay.orders.create({
       amount: advanceAmount * 100,
@@ -593,7 +598,7 @@ const remainingAmount = Math.max(totalAmount - advanceAmount - promoDiscount, 0)
       key: process.env.KEY_ID,
     });
   } catch (err) {
-    console.error("createorder error: - server.js:596", err);
+    console.error("createorder error: - server.js:601", err);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -784,13 +789,13 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
           userEmail = u.email || "";
         }
       } catch (e) {
-        console.warn("Could not fetch user: - server.js:787", e.message);
+        console.warn("Could not fetch user: - server.js:792", e.message);
       }
 
       if (userName && bookingId) {
         db.collection("bookings").doc(bookingId)
           .update({ userName, userPhone, userEmail })
-          .catch((e) => console.warn("Name update failed: - server.js:793", e.message));
+          .catch((e) => console.warn("Name update failed: - server.js:798", e.message));
       }
     }
 
@@ -808,7 +813,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
 
       await Promise.all(deletePromises);
     } catch (e) {
-      console.warn("Lock cleanup failed: - server.js:811", e.message);
+      console.warn("Lock cleanup failed: - server.js:816", e.message);
     }
 
     // Record promo usage
@@ -827,7 +832,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
           usedCount: admin.firestore.FieldValue.increment(1),
         });
       } catch (e) {
-        console.warn("Promo usage recording failed: - server.js:830", e.message);
+        console.warn("Promo usage recording failed: - server.js:835", e.message);
       }
     }
 
@@ -854,7 +859,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
     return res.json({ success: true, bookingId });
 
   } catch (err) {
-    console.error("verifypayment error: - server.js:857", err);
+    console.error("verifypayment error: - server.js:862", err);
 
     // ── AUTO REFUND if slot conflict after payment was captured ───────────────
     if (err.message?.startsWith("SLOT_CONFLICT") && payment_id_outer) {
@@ -866,7 +871,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
             notes: { reason: err.message },
             speed: "normal",
           });
-          console.log("Autorefund initiated: - server.js:869", refund.id);
+          console.log("Autorefund initiated: - server.js:874", refund.id);
 
           // Mark order as refunded
           if (order_id) {
@@ -888,7 +893,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
           });
         }
       } catch (refundErr) {
-        console.error("Autorefund failed: - server.js:891", refundErr.message);
+        console.error("Autorefund failed: - server.js:896", refundErr.message);
         return res.status(409).json({
           success:      false,
           error:        err.message.replace("SLOT_CONFLICT: ", ""),
@@ -911,7 +916,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
         }
       }
     } catch (e) {
-      console.warn("Failed order update: - server.js:914", e.message);
+      console.warn("Failed order update: - server.js:919", e.message);
     }
 
     return res.status(500).json({
@@ -1034,7 +1039,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
 
       await Promise.all(lockDeletePromises);
     } catch (e) {
-      console.warn("Lock cleanup on cancel failed: - server.js:1037", e.message);
+      console.warn("Lock cleanup on cancel failed: - server.js:1042", e.message);
     }
 
     // Razorpay refund
@@ -1055,9 +1060,9 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
           refundStatus: "initiated",
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
-        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1058`);
+        console.log(`Refund initiated: ${refundId} for booking: ${bookingId} - server.js:1063`);
       } catch (refundError) {
-        console.error("Razorpay refund error: - server.js:1060", refundError.message);
+        console.error("Razorpay refund error: - server.js:1065", refundError.message);
         await bookingRef.update({
           refundStatus: "failed",
           refundError: refundError.message,
@@ -1098,7 +1103,7 @@ app.post("/cancel-booking", cancelLimiter, async (req, res) => {
           : "Booking cancelled successfully.",
     });
   } catch (err) {
-    console.error("cancelbooking error: - server.js:1101", err);
+    console.error("cancelbooking error: - server.js:1106", err);
     return res.status(500).json({
       success: false,
       error: err.message || "Cancellation failed. Please try again.",
@@ -1165,9 +1170,9 @@ app.post("/admin-cancel-booking", adminActionLimiter, requireAdminOrOwner, async
           refundStatus:     "initiated",
           refundInitiated:  admin.firestore.FieldValue.serverTimestamp(),
         });
-        console.log(`Admin refund initiated: ${refundId} for booking: ${bookingId} - server.js:1168`);
+        console.log(`Admin refund initiated: ${refundId} for booking: ${bookingId} - server.js:1173`);
       } catch (refundErr) {
-        console.error("Admin refund failed: - server.js:1170", refundErr.message);
+        console.error("Admin refund failed: - server.js:1175", refundErr.message);
         await bookingRef.update({
           refundStatus: "failed",
           refundError:  refundErr.message,
@@ -1206,7 +1211,7 @@ app.post("/admin-cancel-booking", adminActionLimiter, requireAdminOrOwner, async
         : "Booking cancelled successfully.",
     });
   } catch (err) {
-    console.error("admincancelbooking error: - server.js:1209", err);
+    console.error("admincancelbooking error: - server.js:1214", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1256,7 +1261,7 @@ app.get("/refund-status/:bookingId", refundStatusLimiter, async (req, res) => {
       refundAmount: booking.refundAmount || 0,
     });
   } catch (err) {
-    console.error("refundstatus error: - server.js:1259", err);
+    console.error("refundstatus error: - server.js:1264", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1364,7 +1369,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" })
       );
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1367`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1372`);
     }
 
     // Unlink operators
@@ -1379,7 +1384,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
         batch.update(d.ref, { ownerId: null, turfId: null, turfName: "", status: "inactive" })
       );
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1382`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1387`);
     }
 
     await admin.auth().deleteUser(uid);
@@ -1391,7 +1396,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:1394", e);
+    console.error("deleteowner error: - server.js:1399", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1433,7 +1438,7 @@ app.post("/send-reminders", async (req, res) => {
 
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1436", e);
+    console.error("sendreminders error: - server.js:1441", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1490,7 +1495,7 @@ app.post("/send-admin-notification", requireAdminOrOwner, async (req, res) => {
 
     return res.json({ success: true, total, message: "Notifications sent" });
   } catch (e) {
-    console.error("admin notification error: - server.js:1493", e);
+    console.error("admin notification error: - server.js:1498", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1506,7 +1511,7 @@ app.get("/", (req, res) => {
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1509", err);
+  console.error("Global Error: - server.js:1514", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -1515,5 +1520,5 @@ app.use((err, req, res, next) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:1518`);
+  console.log(`Server running on ${PORT} ✅ - server.js:1523`);
 });
