@@ -1503,6 +1503,183 @@ app.post("/send-admin-notification", requireAdminOrOwner, async (req, res) => {
 // =======================================================
 // ✅ HEALTH CHECK
 // =======================================================
+// =======================================================
+// 🏋️ CREATE GYM MEMBERSHIP ORDER
+// Reuses Razorpay + db. Price is sourced from the gym doc — never the client.
+// =======================================================
+app.post("/create-gym-order", orderLimiter, async (req, res) => {
+  try {
+    const { gymId, planId, userId } = req.body;
+
+    if (!gymId || !planId) {
+      return res.status(400).json({ error: "gymId and planId are required" });
+    }
+
+    const gymDoc = await db.collection("gyms").doc(gymId).get();
+    if (!gymDoc.exists) {
+      return res.status(404).json({ error: "Gym not found" });
+    }
+    const gym = gymDoc.data();
+    if (gym.active === false) {
+      return res.status(400).json({ error: "This gym is not currently available" });
+    }
+
+    // ✅ Server-side price lookup — ignore any amount the client might send
+    const plans = Array.isArray(gym.plans) ? gym.plans : [];
+    const plan = plans.find((p) => p.id === planId);
+    if (!plan) {
+      return res.status(400).json({ error: "Invalid membership plan" });
+    }
+
+    const amount = Number(plan.price);
+    const months = Number(plan.months || 1);
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: "Invalid plan amount" });
+    }
+
+    const order = await razorpay.orders.create({
+      amount: amount * 100,
+      currency: "INR",
+      receipt: "gym_" + Date.now(),
+    });
+
+    await db.collection("gymOrders").doc(order.id).set({
+      gymId,
+      gymName:       gym.name || "",
+      gymLocation:   gym.location || "",
+      image:         (Array.isArray(gym.images) && gym.images[0]) || gym.image || "",
+      ownerId:       gym.ownerId || null,
+      ownerName:     gym.ownerName || "",
+      userId:        userId || null,
+      planId:        plan.id,
+      planLabel:     plan.label,
+      months,
+      amount,
+      orderId:       order.id,
+      orderStatus:   "created",
+      paymentStatus: "pending",
+      createdAt:     admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({
+      orderId:  order.id,
+      amount:   order.amount,
+      currency: order.currency,
+      key:      process.env.KEY_ID,
+    });
+  } catch (err) {
+    console.error("creategymorder error: - server.js:1571", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// =======================================================
+// 🏋️ VERIFY GYM MEMBERSHIP PAYMENT
+// Idempotent (transaction on gymOrders), writes a `memberships` doc with
+// a startDate/endDate range — NOT a slot booking.
+// =======================================================
+app.post("/verify-gym-payment", verifyLimiter, async (req, res) => {
+  try {
+    const { order_id, payment_id, signature } = req.body;
+
+    if (!order_id || !payment_id || !signature) {
+      return res.status(400).json({ success: false, error: "Missing fields" });
+    }
+
+    // Signature check
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.KEY_SECRET)
+      .update(order_id + "|" + payment_id)
+      .digest("hex");
+    if (expectedSignature !== signature) {
+      return res.status(400).json({ success: false, error: "Invalid signature" });
+    }
+
+    // Confirm captured at Razorpay
+    const payment = await razorpay.payments.fetch(payment_id);
+    if (payment.status !== "captured") {
+      return res.status(400).json({ success: false, error: "Payment not captured" });
+    }
+
+    const orderRef = db.collection("gymOrders").doc(order_id);
+    let membershipId = null;
+    let alreadyPaid = false;
+    let orderData = null;
+
+    await db.runTransaction(async (txn) => {
+      const orderDoc = await txn.get(orderRef);
+      if (!orderDoc.exists) throw new Error("Order not found");
+      orderData = orderDoc.data();
+
+      if (orderData.orderStatus === "paid") { alreadyPaid = true; return; }
+
+      const start = new Date();
+      const end = new Date(start);
+      end.setMonth(end.getMonth() + Number(orderData.months || 1));
+
+      const memRef = db.collection("memberships").doc();
+      membershipId = memRef.id;
+
+      txn.set(memRef, {
+        userId:     orderData.userId || null,
+        gymId:      orderData.gymId,
+        gymName:    orderData.gymName,
+        ownerId:    orderData.ownerId || null,
+        planId:     orderData.planId,
+        planLabel:  orderData.planLabel,
+        months:     orderData.months,
+        amount:     orderData.amount,
+        startDate:  admin.firestore.Timestamp.fromDate(start),
+        endDate:    admin.firestore.Timestamp.fromDate(end),
+        paymentId:  payment_id,
+        orderId:    order_id,
+        status:     "active",
+        createdAt:  admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      txn.update(orderRef, {
+        orderStatus:   "paid",
+        paymentStatus: "paid",
+        paymentId:     payment_id,
+        membershipId,
+        paidAt:        admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    // Idempotent replay — return the membership already created
+    if (alreadyPaid) {
+      const existing = await db.collection("memberships")
+        .where("orderId", "==", order_id).limit(1).get();
+      return res.json({
+        success: true,
+        membershipId: existing.empty ? null : existing.docs[0].id,
+      });
+    }
+
+    // Notifications
+    sendPushToUser(
+      orderData.userId,
+      "🎉 Membership Active!",
+      `Your ${orderData.planLabel} membership at ${orderData.gymName} is now active.`,
+      { screen: "memberships", membershipId }
+    );
+    if (orderData.ownerId) {
+      sendPushToUser(
+        orderData.ownerId,
+        "💪 New Member",
+        `Someone just bought a ${orderData.planLabel} plan at ${orderData.gymName}.`,
+        { screen: "owner-gym", membershipId }
+      );
+    }
+
+    return res.json({ success: true, membershipId });
+  } catch (err) {
+    console.error("verifygympayment error: - server.js:1677", err);
+    return res.status(500).json({ success: false, error: err.message || "Verification failed" });
+  }
+});
+// the gym server end
+
 app.get("/", (req, res) => {
   res.send("Bookora server running ✅");
 });
@@ -1511,7 +1688,7 @@ app.get("/", (req, res) => {
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1514", err);
+  console.error("Global Error: - server.js:1691", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -1520,5 +1697,5 @@ app.use((err, req, res, next) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:1523`);
+  console.log(`Server running on ${PORT} ✅ - server.js:1700`);
 });
