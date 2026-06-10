@@ -909,7 +909,7 @@ app.post("/verify-payment", verifyLimiter, async (req, res) => {
     sendPushToUser(
       orderData.userId,
       "🎉 Booking Confirmed!",
-      `Your booking at ${orderData.turfName} on ${dateOnly} from ${slotSummary} is confirmed.`,
+      `Your booking at ${orderData.turfName} on ${dateOnly} from ${slotSummary} is confirmed. please note that The booking cannot be cancelled 5 hours in advance.`,
       { screen: "bookings", bookingId }
     );
 
