@@ -1529,35 +1529,47 @@ app.post("/create-league", adminActionLimiter, requireLeagueOwnerOrAdmin, async 
       name, sport, format, city, venue, description,
       startDate, registrationDeadline,
       entryFee, maxTeams, prizePoolPercent,
+      hostType,
     } = req.body;
+
+    const ht = hostType === "open" ? "open" : "managed";   // default managed
 
     if (!name || !String(name).trim())  return res.status(400).json({ success: false, error: "League name is required." });
     if (!sport || !String(sport).trim()) return res.status(400).json({ success: false, error: "Sport is required." });
     if (!LEAGUE_FORMATS.includes(format)) return res.status(400).json({ success: false, error: "Invalid league format." });
     if (!city || !String(city).trim())  return res.status(400).json({ success: false, error: "City is required." });
 
-    const fee   = Number(entryFee);
-    const teams = Number(maxTeams);
+    let fee = Number(entryFee || 0);
+    let teams = Number(maxTeams || 0);
     const prize = Number(prizePoolPercent || 0);
-    if (isNaN(fee) || fee < 0)            return res.status(400).json({ success: false, error: "Entry fee must be 0 or more." });
-    if (isNaN(teams) || teams < 2)        return res.status(400).json({ success: false, error: "Max teams must be at least 2." });
+
+    if (ht === "open") {
+      // Registration leagues need a real fee + team cap
+      if (isNaN(fee) || fee < 0)     return res.status(400).json({ success: false, error: "Entry fee must be 0 or more." });
+      if (isNaN(teams) || teams < 2) return res.status(400).json({ success: false, error: "Max teams must be at least 2." });
+    } else {
+      // Managed: fee/cap optional. 0 teams = no limit.
+      if (isNaN(fee) || fee < 0)   fee = 0;
+      if (isNaN(teams) || teams < 0) teams = 0;
+    }
     if (isNaN(prize) || prize < 0 || prize > 100) return res.status(400).json({ success: false, error: "Prize pool % must be 0–100." });
 
     const ref = db.collection("leagues").doc();
     await ref.set({
       name: String(name).trim(),
       sport: String(sport).trim(),
-      format,                                            // round_robin | knockout | groups_knockout
+      format,
+      hostType: ht,                                  // "managed" | "open"
       city: String(city).trim(),
       venue: venue ? String(venue).trim() : "",
       description: description ? String(description).trim() : "",
-      startDate: startDate ? String(startDate).trim() : "",                       // "YYYY-MM-DD"
-      registrationDeadline: registrationDeadline ? String(registrationDeadline).trim() : "",
+      startDate: startDate ? String(startDate).trim() : "",
+      registrationDeadline: ht === "open" && registrationDeadline ? String(registrationDeadline).trim() : "",
       entryFee: fee,
       maxTeams: teams,
       prizePoolPercent: prize,
       teamCount: 0,
-      status: "registration_open",                       // registration_open | ongoing | completed
+      status: ht === "open" ? "registration_open" : "ongoing",
       organizerId: req.callerUid,
       organizerName: req.callerName || "",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -1565,7 +1577,58 @@ app.post("/create-league", adminActionLimiter, requireLeagueOwnerOrAdmin, async 
 
     res.json({ success: true, leagueId: ref.id });
   } catch (e) {
-    console.error("createleague error: - server.js:1568", e);
+    console.error("createleague error: - server.js:1580", e);
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+// =======================================================
+// 👥 ADD TEAM (to a league, by its organizer or admin)
+// =======================================================
+app.post("/add-team", adminActionLimiter, requireLeagueOwnerOrAdmin, async (req, res) => {
+  try {
+    const { leagueId, name, captainName, players } = req.body;
+
+    if (!leagueId) return res.status(400).json({ success: false, error: "leagueId is required." });
+    if (!name || !String(name).trim()) return res.status(400).json({ success: false, error: "Team name is required." });
+
+    const leagueRef = db.collection("leagues").doc(leagueId);
+    const leagueSnap = await leagueRef.get();
+    if (!leagueSnap.exists) return res.status(404).json({ success: false, error: "League not found." });
+    const league = leagueSnap.data();
+
+    // Ownership: only the organizer (or an admin) can add teams
+    if (req.callerRole !== "admin" && league.organizerId !== req.callerUid) {
+      return res.status(403).json({ success: false, error: "You don't manage this league." });
+    }
+
+    // Capacity check (only matters when a cap is set)
+    if (league.maxTeams > 0 && Number(league.teamCount || 0) >= league.maxTeams) {
+      return res.status(400).json({ success: false, error: "This league is already full." });
+    }
+
+    const cleanPlayers = Array.isArray(players)
+      ? players
+          .map((p) => ({ name: String(p?.name || "").trim() }))
+          .filter((p) => p.name.length > 0)
+      : [];
+
+    const teamRef = db.collection("leagueTeams").doc();
+    await teamRef.set({
+      leagueId,
+      name: String(name).trim(),
+      captainName: captainName ? String(captainName).trim() : "",
+      players: cleanPlayers,
+      playerCount: cleanPlayers.length,
+      source: req.callerRole === "admin" ? "admin" : "organizer",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    await leagueRef.update({ teamCount: admin.firestore.FieldValue.increment(1) });
+
+    res.json({ success: true, teamId: teamRef.id });
+  } catch (e) {
+    console.error("addteam error: - server.js:1631", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1590,7 +1653,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" })
       );
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1593`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1656`);
     }
 
     // Unlink operators
@@ -1605,7 +1668,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
         batch.update(d.ref, { ownerId: null, turfId: null, turfName: "", status: "inactive" })
       );
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1608`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1671`);
     }
 
     await admin.auth().deleteUser(uid);
@@ -1617,7 +1680,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:1620", e);
+    console.error("deleteowner error: - server.js:1683", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1659,7 +1722,7 @@ app.post("/send-reminders", async (req, res) => {
 
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1662", e);
+    console.error("sendreminders error: - server.js:1725", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1716,7 +1779,7 @@ app.post("/send-admin-notification", requireAdminOrOwner, async (req, res) => {
 
     return res.json({ success: true, total, message: "Notifications sent" });
   } catch (e) {
-    console.error("admin notification error: - server.js:1719", e);
+    console.error("admin notification error: - server.js:1782", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1837,7 +1900,7 @@ app.post("/create-gym-order", orderLimiter, async (req, res) => {
       key:      process.env.KEY_ID,
     });
   } catch (err) {
-    console.error("creategymorder error: - server.js:1840", err);
+    console.error("creategymorder error: - server.js:1903", err);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -1948,7 +2011,7 @@ app.post("/verify-gym-payment", verifyLimiter, async (req, res) => {
           usedCount: admin.firestore.FieldValue.increment(1),
         });
       } catch (e) {
-        console.warn("gym promo usage failed: - server.js:1951", e.message);
+        console.warn("gym promo usage failed: - server.js:2014", e.message);
       }
     }
 
@@ -1970,7 +2033,7 @@ app.post("/verify-gym-payment", verifyLimiter, async (req, res) => {
 
     return res.json({ success: true, membershipId });
   } catch (err) {
-    console.error("verifygympayment error: - server.js:1973", err);
+    console.error("verifygympayment error: - server.js:2036", err);
     return res.status(500).json({ success: false, error: err.message || "Verification failed" });
   }
 });
@@ -2001,7 +2064,7 @@ app.get("/", (req, res) => {
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:2004", err);
+  console.error("Global Error: - server.js:2067", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -2010,5 +2073,5 @@ app.use((err, req, res, next) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:2013`);
+  console.log(`Server running on ${PORT} ✅ - server.js:2076`);
 });
