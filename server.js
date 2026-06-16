@@ -1421,6 +1421,155 @@ app.post("/create-operator", adminActionLimiter, requireAdminOrOwner, async (req
   }
 });
 
+//league
+// =======================================================
+// 🏆 CREATE LEAGUE OWNER  (admin only)
+// Separate from /create-owner so the turf-owner flow is untouched.
+// Creates a Firebase Auth user + users doc with role "league-owner".
+// Banking is OPTIONAL here — only validated if provided.
+// =======================================================
+app.post("/create-league-owner", adminActionLimiter, requireAdminOrOwner, async (req, res) => {
+  try {
+    // Only admins — a turf owner must NOT be able to create league owners
+    if (req.callerRole !== "admin") {
+      return res.status(403).json({ success: false, error: "Only admins can create league owners." });
+    }
+
+    const {
+      name, email, phone, password,
+      organizationName, city, description,
+      bankAccountNo, bankIfsc, bankName, bankUpi, // optional
+    } = req.body;
+
+    if (!name || !String(name).trim())
+      return res.status(400).json({ success: false, error: "Name is required." });
+    if (!email || !String(email).trim())
+      return res.status(400).json({ success: false, error: "Email is required." });
+    if (!password || String(password).length < 6)
+      return res.status(400).json({ success: false, error: "Password must be at least 6 characters." });
+    if (!city || !String(city).trim())
+      return res.status(400).json({ success: false, error: "City is required." });
+
+    // Optional banking — validate ONLY if any bank field was sent
+    let banking = null;
+    if (bankAccountNo || bankIfsc || bankName) {
+      const ifscClean = String(bankIfsc || "").trim().toUpperCase();
+      if (!bankAccountNo || String(bankAccountNo).trim().length < 9)
+        return res.status(400).json({ success: false, error: "Bank account number looks invalid." });
+      if (!/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifscClean))
+        return res.status(400).json({ success: false, error: "Valid IFSC code is required (e.g. SBIN0001234)." });
+      banking = {
+        accountNo: String(bankAccountNo).trim(),
+        ifsc:      ifscClean,
+        name:      String(bankName || name).trim(),
+        upi:       bankUpi ? String(bankUpi).trim() : null,
+        verified:  false,
+        addedAt:   admin.firestore.FieldValue.serverTimestamp(),
+      };
+    }
+
+    const userRecord = await admin.auth().createUser({
+      email: String(email).trim(),
+      password,
+      displayName: name,
+    });
+
+    await db.collection("users").doc(userRecord.uid).set({
+      name:             String(name).trim(),
+      email:            String(email).trim(),
+      phone:            phone ? String(phone).trim() : "",
+      organizationName: organizationName ? String(organizationName).trim() : "",
+      city:             String(city).trim(),
+      description:      description ? String(description).trim() : "",
+      role:             "league-owner",
+      status:           "active",
+      banking,                                  // null until added later
+      createdAt:        admin.firestore.FieldValue.serverTimestamp(),
+      createdBy:        req.callerUid,
+    });
+
+    res.json({ success: true, uid: userRecord.uid });
+  } catch (e) {
+    console.error("createleagueowner error: - server.js:1493", e);
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+// league 
+// ── League-owner / admin token middleware ─────────────────────────────────
+async function requireLeagueOwnerOrAdmin(req, res, next) {
+  const authHeader = req.headers["authorization"] || "";
+  const token = authHeader.replace("Bearer ", "").trim();
+  if (!token) return res.status(401).json({ success: false, error: "Missing authorization token" });
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    const userDoc = await db.collection("users").doc(decoded.uid).get();
+    if (!userDoc.exists) return res.status(401).json({ success: false, error: "User not found" });
+    const role = userDoc.data().role;
+    if (role !== "admin" && role !== "league-owner") {
+      return res.status(403).json({ success: false, error: "Forbidden — league owner or admin only" });
+    }
+    req.callerUid  = decoded.uid;
+    req.callerRole = role;
+    req.callerName = userDoc.data().name || "";
+    next();
+  } catch {
+    return res.status(401).json({ success: false, error: "Invalid or expired token" });
+  }
+}
+
+// =======================================================
+// 🏆 CREATE LEAGUE  (league owner or admin)
+// =======================================================
+const LEAGUE_FORMATS = ["round_robin", "knockout", "groups_knockout"];
+
+app.post("/create-league", adminActionLimiter, requireLeagueOwnerOrAdmin, async (req, res) => {
+  try {
+    const {
+      name, sport, format, city, venue, description,
+      startDate, registrationDeadline,
+      entryFee, maxTeams, prizePoolPercent,
+    } = req.body;
+
+    if (!name || !String(name).trim())  return res.status(400).json({ success: false, error: "League name is required." });
+    if (!sport || !String(sport).trim()) return res.status(400).json({ success: false, error: "Sport is required." });
+    if (!LEAGUE_FORMATS.includes(format)) return res.status(400).json({ success: false, error: "Invalid league format." });
+    if (!city || !String(city).trim())  return res.status(400).json({ success: false, error: "City is required." });
+
+    const fee   = Number(entryFee);
+    const teams = Number(maxTeams);
+    const prize = Number(prizePoolPercent || 0);
+    if (isNaN(fee) || fee < 0)            return res.status(400).json({ success: false, error: "Entry fee must be 0 or more." });
+    if (isNaN(teams) || teams < 2)        return res.status(400).json({ success: false, error: "Max teams must be at least 2." });
+    if (isNaN(prize) || prize < 0 || prize > 100) return res.status(400).json({ success: false, error: "Prize pool % must be 0–100." });
+
+    const ref = db.collection("leagues").doc();
+    await ref.set({
+      name: String(name).trim(),
+      sport: String(sport).trim(),
+      format,                                            // round_robin | knockout | groups_knockout
+      city: String(city).trim(),
+      venue: venue ? String(venue).trim() : "",
+      description: description ? String(description).trim() : "",
+      startDate: startDate ? String(startDate).trim() : "",                       // "YYYY-MM-DD"
+      registrationDeadline: registrationDeadline ? String(registrationDeadline).trim() : "",
+      entryFee: fee,
+      maxTeams: teams,
+      prizePoolPercent: prize,
+      teamCount: 0,
+      status: "registration_open",                       // registration_open | ongoing | completed
+      organizerId: req.callerUid,
+      organizerName: req.callerName || "",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    res.json({ success: true, leagueId: ref.id });
+  } catch (e) {
+    console.error("createleague error: - server.js:1568", e);
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
 // =======================================================
 // 🗑️ DELETE OWNER
 // FIX ✅: requireAdminSecret middleware added.
@@ -1441,7 +1590,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" })
       );
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1444`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1593`);
     }
 
     // Unlink operators
@@ -1456,7 +1605,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
         batch.update(d.ref, { ownerId: null, turfId: null, turfName: "", status: "inactive" })
       );
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1459`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1608`);
     }
 
     await admin.auth().deleteUser(uid);
@@ -1468,7 +1617,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:1471", e);
+    console.error("deleteowner error: - server.js:1620", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1510,7 +1659,7 @@ app.post("/send-reminders", async (req, res) => {
 
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1513", e);
+    console.error("sendreminders error: - server.js:1662", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1567,7 +1716,7 @@ app.post("/send-admin-notification", requireAdminOrOwner, async (req, res) => {
 
     return res.json({ success: true, total, message: "Notifications sent" });
   } catch (e) {
-    console.error("admin notification error: - server.js:1570", e);
+    console.error("admin notification error: - server.js:1719", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1688,7 +1837,7 @@ app.post("/create-gym-order", orderLimiter, async (req, res) => {
       key:      process.env.KEY_ID,
     });
   } catch (err) {
-    console.error("creategymorder error: - server.js:1691", err);
+    console.error("creategymorder error: - server.js:1840", err);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -1799,7 +1948,7 @@ app.post("/verify-gym-payment", verifyLimiter, async (req, res) => {
           usedCount: admin.firestore.FieldValue.increment(1),
         });
       } catch (e) {
-        console.warn("gym promo usage failed: - server.js:1802", e.message);
+        console.warn("gym promo usage failed: - server.js:1951", e.message);
       }
     }
 
@@ -1821,7 +1970,7 @@ app.post("/verify-gym-payment", verifyLimiter, async (req, res) => {
 
     return res.json({ success: true, membershipId });
   } catch (err) {
-    console.error("verifygympayment error: - server.js:1824", err);
+    console.error("verifygympayment error: - server.js:1973", err);
     return res.status(500).json({ success: false, error: err.message || "Verification failed" });
   }
 });
@@ -1852,7 +2001,7 @@ app.get("/", (req, res) => {
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1855", err);
+  console.error("Global Error: - server.js:2004", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -1861,5 +2010,5 @@ app.use((err, req, res, next) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:1864`);
+  console.log(`Server running on ${PORT} ✅ - server.js:2013`);
 });
