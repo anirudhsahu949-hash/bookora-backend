@@ -1634,6 +1634,56 @@ app.post("/add-team", adminActionLimiter, requireLeagueOwnerOrAdmin, async (req,
 });
 
 // =======================================================
+// 📅 ADD MATCH (fixture) to a league
+// =======================================================
+app.post("/add-match", adminActionLimiter, requireLeagueOwnerOrAdmin, async (req, res) => {
+  try {
+    const { leagueId, teamAId, teamBId, date, startTime, endTime, venue } = req.body;
+    if (!leagueId) return res.status(400).json({ success: false, error: "leagueId is required." });
+    if (!teamAId || !teamBId) return res.status(400).json({ success: false, error: "Both teams are required." });
+    if (teamAId === teamBId) return res.status(400).json({ success: false, error: "A team cannot play itself." });
+
+    const leagueRef = db.collection("leagues").doc(leagueId);
+    const leagueSnap = await leagueRef.get();
+    if (!leagueSnap.exists) return res.status(404).json({ success: false, error: "League not found." });
+    const league = leagueSnap.data();
+    if (req.callerRole !== "admin" && league.organizerId !== req.callerUid)
+      return res.status(403).json({ success: false, error: "You don't manage this league." });
+
+    const [aSnap, bSnap] = await Promise.all([
+      db.collection("leagueTeams").doc(teamAId).get(),
+      db.collection("leagueTeams").doc(teamBId).get(),
+    ]);
+    if (!aSnap.exists || !bSnap.exists) return res.status(404).json({ success: false, error: "One of the teams was not found." });
+    const a = aSnap.data(), b = bSnap.data();
+    if (a.leagueId !== leagueId || b.leagueId !== leagueId)
+      return res.status(400).json({ success: false, error: "Both teams must belong to this league." });
+
+    const ref = db.collection("leagueMatches").doc();
+    await ref.set({
+      leagueId,
+      teamAId, teamAName: a.name || "Team A",
+      teamBId, teamBName: b.name || "Team B",
+      date: date ? String(date).trim() : "",
+      startTime: startTime ? String(startTime).trim() : "",
+      endTime: endTime ? String(endTime).trim() : "",
+      venue: venue ? String(venue).trim() : "",
+      status: "scheduled",                 // scheduled | live | completed
+      scoreA: 0,
+      scoreB: 0,
+      winnerId: null,
+      organizerId: league.organizerId || null,
+      sport: league.sport || "",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    res.json({ success: true, matchId: ref.id });
+  } catch (e) {
+    console.error("addmatch error: - server.js:1681", e);
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+// =======================================================
 // 🗑️ DELETE OWNER
 // FIX ✅: requireAdminSecret middleware added.
 // =======================================================
@@ -1653,7 +1703,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
         batch.update(d.ref, { active: false, deactivatedReason: "owner_deleted" })
       );
       await batch.commit();
-      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1656`);
+      console.log(`Deactivated ${turfSnap.size} turf(s) for owner ${uid} - server.js:1706`);
     }
 
     // Unlink operators
@@ -1668,7 +1718,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
         batch.update(d.ref, { ownerId: null, turfId: null, turfName: "", status: "inactive" })
       );
       await batch.commit();
-      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1671`);
+      console.log(`Unlinked ${operatorSnap.size} operator(s) from owner ${uid} - server.js:1721`);
     }
 
     await admin.auth().deleteUser(uid);
@@ -1680,7 +1730,7 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
       operatorsUnlinked: operatorSnap.size,
     });
   } catch (e) {
-    console.error("deleteowner error: - server.js:1683", e);
+    console.error("deleteowner error: - server.js:1733", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1722,7 +1772,7 @@ app.post("/send-reminders", async (req, res) => {
 
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1725", e);
+    console.error("sendreminders error: - server.js:1775", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1779,7 +1829,7 @@ app.post("/send-admin-notification", requireAdminOrOwner, async (req, res) => {
 
     return res.json({ success: true, total, message: "Notifications sent" });
   } catch (e) {
-    console.error("admin notification error: - server.js:1782", e);
+    console.error("admin notification error: - server.js:1832", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1900,7 +1950,7 @@ app.post("/create-gym-order", orderLimiter, async (req, res) => {
       key:      process.env.KEY_ID,
     });
   } catch (err) {
-    console.error("creategymorder error: - server.js:1903", err);
+    console.error("creategymorder error: - server.js:1953", err);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -2011,7 +2061,7 @@ app.post("/verify-gym-payment", verifyLimiter, async (req, res) => {
           usedCount: admin.firestore.FieldValue.increment(1),
         });
       } catch (e) {
-        console.warn("gym promo usage failed: - server.js:2014", e.message);
+        console.warn("gym promo usage failed: - server.js:2064", e.message);
       }
     }
 
@@ -2033,7 +2083,7 @@ app.post("/verify-gym-payment", verifyLimiter, async (req, res) => {
 
     return res.json({ success: true, membershipId });
   } catch (err) {
-    console.error("verifygympayment error: - server.js:2036", err);
+    console.error("verifygympayment error: - server.js:2086", err);
     return res.status(500).json({ success: false, error: err.message || "Verification failed" });
   }
 });
@@ -2064,7 +2114,7 @@ app.get("/", (req, res) => {
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:2067", err);
+  console.error("Global Error: - server.js:2117", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -2073,5 +2123,5 @@ app.use((err, req, res, next) => {
 // =======================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} ✅ - server.js:2076`);
+  console.log(`Server running on ${PORT} ✅ - server.js:2126`);
 });
