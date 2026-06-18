@@ -1370,52 +1370,68 @@ app.post("/create-league", adminActionLimiter, requireLeagueOwnerOrAdmin, async 
   }
 });
 
-app.post("/add-team", adminActionLimiter, requireLeagueOwnerOrAdmin, async (req, res) => {
+// ─────────────────────────────────────────────────────────────────────────────
+// /add-team  — league owner adds a team with optional player UID linking
+// REPLACE your existing /add-team handler with this entire block
+// ─────────────────────────────────────────────────────────────────────────────
+app.post("/add-team", requireLeagueOwnerOrAdmin, async (req, res) => {
   try {
     const { leagueId, name, captainName, players } = req.body;
-    if (!leagueId) return res.status(400).json({ success: false, error: "leagueId is required." });
-    if (!name || !String(name).trim()) return res.status(400).json({ success: false, error: "Team name is required." });
 
-    const leagueRef  = db.collection("leagues").doc(leagueId);
+    if (!leagueId) return res.status(400).json({ error: "leagueId required" });
+    if (!name || !String(name).trim()) return res.status(400).json({ error: "Team name required" });
+
+    // Validate league exists
+    const leagueRef = db.collection("leagues").doc(leagueId);
     const leagueSnap = await leagueRef.get();
-    if (!leagueSnap.exists) return res.status(404).json({ success: false, error: "League not found." });
-    const league = leagueSnap.data();
+    if (!leagueSnap.exists) return res.status(404).json({ error: "League not found" });
 
-    if (req.callerRole !== "admin" && league.organizerId !== req.callerUid) {
-      return res.status(403).json({ success: false, error: "You don't manage this league." });
-    }
-    if (league.maxTeams > 0 && Number(league.teamCount || 0) >= league.maxTeams) {
-      return res.status(400).json({ success: false, error: "This league is already full." });
-    }
-
-    // Support both plain name strings and {uid, playonId, displayName} objects
+    // ── Build clean player list ───────────────────────────────────────────────
+    // players is an array of: { name, uid?, playonId? }
+    // uid and playonId are optional — players without a Playon ID are still accepted
     const cleanPlayers = Array.isArray(players)
       ? players
-          .map((p) => {
-            if (typeof p === "string") return { name: p.trim(), uid: null, playonId: null };
-            return {
-              name:      String(p?.displayName || p?.name || "").trim(),
-              uid:       p?.uid       || null,
-              playonId:  p?.playonId  || null,
-            };
-          })
-          .filter((p) => p.name.length > 0)
+          .filter((p) => p && String(p.name || "").trim())
+          .map((p) => ({
+            name: String(p.name).trim(),
+            ...(p.uid      ? { uid: String(p.uid).trim() }           : {}),
+            ...(p.playonId ? { playonId: String(p.playonId).trim() } : {}),
+          }))
       : [];
 
+    // ── Extract playerUids[] — top-level array for easy querying ─────────────
+    // This is what "My Leagues" and "Stats" screens query later:
+    //   query(collection(db, "leagueTeams"), where("playerUids", "array-contains", uid))
+    const playerUids = cleanPlayers
+      .filter((p) => p.uid)
+      .map((p) => p.uid);
+
+    // ── Write the team document ───────────────────────────────────────────────
     const teamRef = db.collection("leagueTeams").doc();
     await teamRef.set({
-      leagueId, name: String(name).trim(),
+      leagueId,
+      name:        String(name).trim(),
       captainName: captainName ? String(captainName).trim() : "",
-      players: cleanPlayers, playerCount: cleanPlayers.length,
-      source: req.callerRole === "admin" ? "admin" : "organizer",
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      players:     cleanPlayers,
+      playerUids,               // ← new field — uids of linked players only
+      playerCount: cleanPlayers.length,
+      createdAt:   admin.firestore.FieldValue.serverTimestamp(),
     });
-    await leagueRef.update({ teamCount: admin.firestore.FieldValue.increment(1) });
 
-    res.json({ success: true, teamId: teamRef.id });
-  } catch (e) {
-    console.error("addteam error: - server.js:1417", e);
-    res.status(400).json({ success: false, error: e.message });
+    // ── Increment league teamCount ────────────────────────────────────────────
+    await leagueRef.update({
+      teamCount: admin.firestore.FieldValue.increment(1),
+    });
+
+    return res.json({
+      success: true,
+      teamId:  teamRef.id,
+      playerCount: cleanPlayers.length,
+      linkedCount: playerUids.length,
+    });
+  } catch (err) {
+    console.error("addteam error: - server.js:1433", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1459,7 +1475,7 @@ app.post("/add-match", adminActionLimiter, requireLeagueOwnerOrAdmin, async (req
 
     res.json({ success: true, matchId: ref.id });
   } catch (e) {
-    console.error("addmatch error: - server.js:1462", e);
+    console.error("addmatch error: - server.js:1478", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1529,9 +1545,9 @@ app.post("/update-match-score", adminActionLimiter, requireLeagueOwnerOrAdmin, a
                   "stats.losses":  (Number(s.losses)  || 0) + (result === "loss" ? 1 : 0),
                   "stats.draws":   (Number(s.draws)   || 0) + (result === "draw" ? 1 : 0),
                 });
-                console.log(`Stats updated: uid=${player.uid} result=${result} - server.js:1532`);
+                console.log(`Stats updated: uid=${player.uid} result=${result} - server.js:1548`);
               } catch (e) {
-                console.error(`Stats update failed for uid=${player.uid}: - server.js:1534`, e.message);
+                console.error(`Stats update failed for uid=${player.uid}: - server.js:1550`, e.message);
               }
             })
         );
@@ -1542,12 +1558,12 @@ app.post("/update-match-score", adminActionLimiter, requireLeagueOwnerOrAdmin, a
         updateTeamPlayers(teamBSnap, resultB),
       ]);
 
-      console.log(`Match ${matchId} completed. Stats engine done. A:${sA} B:${sB} - server.js:1545`);
+      console.log(`Match ${matchId} completed. Stats engine done. A:${sA} B:${sB} - server.js:1561`);
     }
 
     res.json({ success: true });
   } catch (e) {
-    console.error("updatematchscore error: - server.js:1550", e);
+    console.error("updatematchscore error: - server.js:1566", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1559,29 +1575,10 @@ app.post("/update-match-score", adminActionLimiter, requireLeagueOwnerOrAdmin, a
 // =======================================================
 app.post("/create-player-profile-order", profileLimiter, requireAuth, async (req, res) => {
   try {
-    const { playonId, sports, bio } = req.body;
+    const { playonId, sports, bio, age, playerRole, battingHand, bowlingStyle, isRenewal } = req.body;
     const uid = req.callerUid;
 
-    // Format check
-    const cleanId = String(playonId || "").trim().toLowerCase();
-    if (!/^[a-z0-9_]{3,24}$/.test(cleanId)) {
-      return res.status(400).json({ success: false, error: "Playon ID must be 3–24 chars: lowercase letters, numbers, underscore only." });
-    }
-
-    // Already has a profile?
-    const existingProfile = await db.collection("playerProfiles").doc(uid).get();
-    if (existingProfile.exists) {
-      return res.status(400).json({ success: false, error: "You already have a Playon ID." });
-    }
-
-    // ID taken?
-    const idSnap = await db.collection("playerProfiles")
-      .where("playonId", "==", cleanId).limit(1).get();
-    if (!idSnap.empty) {
-      return res.status(400).json({ success: false, error: "This Playon ID is already taken. Try another one." });
-    }
-
-    // Read fee from admin config
+    // Read admin config first (needed for both new + renewal)
     const configSnap = await db.collection("appConfig").doc("playerProfile").get();
     const fee        = configSnap.exists ? Number(configSnap.data().fee ?? 0) : 0;
     const enabled    = configSnap.exists ? configSnap.data().enabled !== false : true;
@@ -1593,18 +1590,47 @@ app.post("/create-player-profile-order", profileLimiter, requireAuth, async (req
       return res.status(400).json({ success: false, error: "Profile creation is free — use the free endpoint instead." });
     }
 
-    // Fetch user's display name
+    const existingProfile = await db.collection("playerProfiles").doc(uid).get();
+
+    if (isRenewal) {
+      // ── RENEWAL: profile must already exist ──────────────────────────────
+      if (!existingProfile.exists) {
+        return res.status(400).json({ success: false, error: "No profile found to renew." });
+      }
+    } else {
+      // ── NEW PROFILE ───────────────────────────────────────────────────────
+      if (existingProfile.exists) {
+        return res.status(400).json({ success: false, error: "You already have a Playon ID." });
+      }
+
+      const cleanId = String(playonId || "").trim().toLowerCase();
+      if (!/^[a-z0-9_]{3,24}$/.test(cleanId)) {
+        return res.status(400).json({ success: false, error: "Playon ID must be 3–24 chars: lowercase letters, numbers, underscore only." });
+      }
+
+      const idSnap = await db.collection("playerProfiles")
+        .where("playonId", "==", cleanId).limit(1).get();
+      if (!idSnap.empty) {
+        return res.status(400).json({ success: false, error: "This Playon ID is already taken. Try another one." });
+      }
+    }
+
+    // Fetch user display name
     let displayName = "Player";
     try {
       const uSnap = await db.collection("users").doc(uid).get();
       if (uSnap.exists) displayName = uSnap.data().name || "Player";
     } catch {}
 
+    const cleanId = isRenewal
+      ? (existingProfile.data().playonId || "")
+      : String(playonId || "").trim().toLowerCase();
+
     const order = await razorpay.orders.create({
       amount:   Math.round(fee * 100),
       currency: "INR",
       receipt:  `profile_${Date.now()}`,
-      notes:    { uid, playonId: cleanId, type: "player_profile" },
+      notes:    { uid, playonId: cleanId, type: isRenewal ? "profile_renewal" : "player_profile" },
     });
 
     // Store metadata for verify step
@@ -1612,11 +1638,16 @@ app.post("/create-player-profile-order", profileLimiter, requireAuth, async (req
       uid,
       playonId:    cleanId,
       displayName,
-      sports:      Array.isArray(sports) ? sports : [],
-      bio:         String(bio || "").slice(0, 120),
+      sports:      Array.isArray(sports) ? sports : (isRenewal ? (existingProfile.data().sports || []) : []),
+      bio:         isRenewal ? (existingProfile.data().bio || "") : String(bio || "").slice(0, 120),
+      age:         age || null,
+      playerRole:  playerRole || null,
+      battingHand: battingHand || null,
+      bowlingStyle:bowlingStyle || null,
       fee,
+      isRenewal:   !!isRenewal,
+      orderCreatedAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(), // pending order TTL
       createdAt:   admin.firestore.FieldValue.serverTimestamp(),
-      expiresAt:   new Date(Date.now() + 30 * 60 * 1000).toISOString(), // 30 min
     });
 
     return res.json({
@@ -1626,16 +1657,17 @@ app.post("/create-player-profile-order", profileLimiter, requireAuth, async (req
       key:      process.env.KEY_ID,
     });
   } catch (err) {
-    console.error("createplayerprofileorder error: - server.js:1629", err);
+    console.error("createplayerprofileorder error: - server.js:1660", err);
     return res.status(500).json({ success: false, error: err.message || "Could not create order." });
   }
 });
 
 // =======================================================
 // 👤 PLAYER PROFILE — VERIFY PAYMENT
-// Verifies Razorpay signature → writes playerProfiles/{uid}.
-// Race-condition guard: second uniqueness check inside handler.
-// If ID was taken between order creation and payment → auto-refund.
+// Works for both new profile creation AND yearly renewal.
+// p.isRenewal === true  → merge-update expiresAt only, keep all stats intact
+// p.isRenewal === false → create full profile doc from scratch
+// Race-condition guard on new creation: ID taken between order & payment → auto-refund
 // =======================================================
 app.post("/verify-player-profile-payment", verifyLimiter, async (req, res) => {
   try {
@@ -1653,40 +1685,75 @@ app.post("/verify-player-profile-payment", verifyLimiter, async (req, res) => {
       return res.status(400).json({ success: false, error: "Invalid payment signature." });
     }
 
-    // Confirm captured
+    // Confirm captured at Razorpay
     const payment = await razorpay.payments.fetch(payment_id);
     if (payment.status !== "captured") {
       return res.status(400).json({ success: false, error: "Payment not captured." });
     }
 
-    // Load pending order
+    // Load pending order metadata
     const pendingSnap = await db.collection("pendingProfileOrders").doc(order_id).get();
     if (!pendingSnap.exists) {
       return res.status(404).json({ success: false, error: "Order not found or already used." });
     }
     const p = pendingSnap.data();
 
-    // Already has a profile? (idempotency)
+    // Calculate new expiry: 1 year from now
+    const newExpiresAt = new Date();
+    newExpiresAt.setFullYear(newExpiresAt.getFullYear() + 1);
+    const expiresAtTimestamp = admin.firestore.Timestamp.fromDate(newExpiresAt);
+
+    if (p.isRenewal) {
+      // ── RENEWAL: only update expiry fields, keep all stats/playonId/sports intact ──
+      const profileRef = db.collection("playerProfiles").doc(p.uid);
+      const profileSnap = await profileRef.get();
+      if (!profileSnap.exists) {
+        // Edge case: profile deleted after renewal order was created
+        await db.collection("pendingProfileOrders").doc(order_id).delete().catch(() => {});
+        return res.status(404).json({ success: false, error: "Profile not found. Cannot renew." });
+      }
+
+      await profileRef.update({
+        expiresAt:      expiresAtTimestamp,
+        lastRenewedAt:  admin.firestore.FieldValue.serverTimestamp(),
+        lastPaymentId:  payment_id,
+        lastOrderId:    order_id,
+        feePaid:        p.fee,
+        isExpired:      false,
+      });
+
+      await db.collection("pendingProfileOrders").doc(order_id).delete().catch(() => {});
+
+      sendPushToUser(p.uid, "✅ Playon Pro Renewed!",
+        `Your @${p.playonId} profile is active for another year. Keep playing!`,
+        { screen: "profile" }
+      );
+
+      return res.json({ success: true, isRenewal: true, expiresAt: newExpiresAt.toISOString() });
+    }
+
+    // ── NEW PROFILE ───────────────────────────────────────────────────────────
+
+    // Idempotency: already created (e.g. duplicate verify call)
     const existingProfile = await db.collection("playerProfiles").doc(p.uid).get();
-    if (existingProfile.exists) {
+    if (existingProfile.exists && !existingProfile.data().isExpired) {
       await db.collection("pendingProfileOrders").doc(order_id).delete().catch(() => {});
       return res.json({ success: true, alreadyExists: true });
     }
 
-    // Race-condition: ID taken between order creation and payment
+    // Race-condition guard: ID taken between order creation and payment
     const idSnap = await db.collection("playerProfiles")
       .where("playonId", "==", p.playonId).limit(1).get();
     if (!idSnap.empty) {
-      // Auto-refund
       try {
         await razorpay.payments.refund(payment_id, {
           amount: Math.round(p.fee * 100),
           notes:  { reason: "Playon ID was taken by another user during checkout." },
           speed:  "normal",
         });
-        console.log(`Autorefund issued for profile order ${order_id}  ID taken - server.js:1687`);
+        console.log(`Autorefund issued for profile order ${order_id}  ID taken - server.js:1754`);
       } catch (refundErr) {
-        console.error("Profile order refund failed: - server.js:1689", refundErr.message);
+        console.error("Profile order refund failed: - server.js:1756", refundErr.message);
       }
       await db.collection("pendingProfileOrders").doc(order_id).delete().catch(() => {});
       return res.status(409).json({
@@ -1696,32 +1763,43 @@ app.post("/verify-player-profile-payment", verifyLimiter, async (req, res) => {
       });
     }
 
-    // All clear — write the profile
+    // Write full profile
     await db.collection("playerProfiles").doc(p.uid).set({
       playonId:    p.playonId,
       displayName: p.displayName,
-      sports:      p.sports || [],
-      bio:         p.bio    || "",
-      stats:       { matches: 0, wins: 0, losses: 0, draws: 0 },
-      rating:      0,
-      isProPlayer: false,
-      orderId:     order_id,
-      paymentId:   payment_id,
-      feePaid:     p.fee,
-      createdAt:   admin.firestore.FieldValue.serverTimestamp(),
+      sports:      p.sports      || [],
+      bio:         p.bio         || "",
+      age:         p.age         || null,
+      playerRole:  p.playerRole  || null,
+      battingHand: p.battingHand || null,
+      bowlingStyle:p.bowlingStyle|| null,
+      stats: {
+        matches: 0, wins: 0, losses: 0, draws: 0,
+        runs: 0, wickets: 0, fifties: 0, hundreds: 0,
+        goals: 0, assists: 0, points: 0,
+      },
+      rating:         0,
+      isProPlayer:    false,
+      isExpired:      false,
+      expiresAt:      expiresAtTimestamp,
+      orderId:        order_id,
+      paymentId:      payment_id,
+      lastPaymentId:  payment_id,
+      lastOrderId:    order_id,
+      feePaid:        p.fee,
+      createdAt:      admin.firestore.FieldValue.serverTimestamp(),
     });
 
     await db.collection("pendingProfileOrders").doc(order_id).delete().catch(() => {});
 
-    // Welcome notification
     sendPushToUser(p.uid, "🎉 Playon ID Created!",
-      `Welcome @${p.playonId}! Your player profile is live. Join a league to start tracking your stats.`,
+      `Welcome @${p.playonId}! Your profile is live for 1 year. Join a league to start tracking your stats.`,
       { screen: "profile" }
     );
 
-    return res.json({ success: true });
+    return res.json({ success: true, isRenewal: false, expiresAt: newExpiresAt.toISOString() });
   } catch (err) {
-    console.error("verifyplayerprofilepayment error: - server.js:1724", err);
+    console.error("verifyplayerprofilepayment error: - server.js:1802", err);
     return res.status(500).json({ success: false, error: err.message || "Verification failed." });
   }
 });
@@ -1761,7 +1839,7 @@ app.post("/send-reminders", async (req, res) => {
 
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1764", e);
+    console.error("sendreminders error: - server.js:1842", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1803,7 +1881,7 @@ app.post("/send-admin-notification", requireAdminOrOwner, async (req, res) => {
 
     return res.json({ success: true, total, message: "Notifications sent" });
   } catch (e) {
-    console.error("sendadminnotification error: - server.js:1806", e);
+    console.error("sendadminnotification error: - server.js:1884", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1829,7 +1907,7 @@ app.get("/", (req, res) => res.send("Bookora server running ✅"));
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1832", err);
+  console.error("Global Error: - server.js:1910", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -1837,4 +1915,4 @@ app.use((err, req, res, next) => {
 // 🚀 START
 // =======================================================
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on ${PORT} ✅ - server.js:1840`));
+app.listen(PORT, () => console.log(`Server running on ${PORT} ✅ - server.js:1918`));
