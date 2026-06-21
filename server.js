@@ -232,7 +232,7 @@ async function requireLeagueOwnerOrAdmin(req, res, next) {
     const userDoc = await db.collection("users").doc(decoded.uid).get();
     if (!userDoc.exists) return res.status(401).json({ success: false, error: "User not found" });
     const role = userDoc.data().role;
-    if (role !== "admin" && role !== "league-owner") {
+    if (role !== "admin" && role !== "league-owner" && role !== "user") {
       return res.status(403).json({ success: false, error: "Forbidden — league owner or admin only" });
     }
     req.callerUid  = decoded.uid;
@@ -1385,6 +1385,9 @@ app.post("/add-team", requireLeagueOwnerOrAdmin, async (req, res) => {
     const leagueRef = db.collection("leagues").doc(leagueId);
     const leagueSnap = await leagueRef.get();
     if (!leagueSnap.exists) return res.status(404).json({ error: "League not found" });
+    if (req.callerRole !== "admin" && leagueSnap.data().organizerId !== req.callerUid) {
+  return res.status(403).json({ error: "You don't manage this league" });
+}
 
     // ── Build clean player list ───────────────────────────────────────────────
     // players is an array of: { name, uid?, playonId? }
@@ -1430,7 +1433,7 @@ app.post("/add-team", requireLeagueOwnerOrAdmin, async (req, res) => {
       linkedCount: playerUids.length,
     });
   } catch (err) {
-    console.error("addteam error: - server.js:1433", err);
+    console.error("addteam error: - server.js:1436", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -1475,7 +1478,7 @@ app.post("/add-match", adminActionLimiter, requireLeagueOwnerOrAdmin, async (req
 
     res.json({ success: true, matchId: ref.id });
   } catch (e) {
-    console.error("addmatch error: - server.js:1478", e);
+    console.error("addmatch error: - server.js:1481", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1545,9 +1548,9 @@ app.post("/update-match-score", adminActionLimiter, requireLeagueOwnerOrAdmin, a
                   "stats.losses":  (Number(s.losses)  || 0) + (result === "loss" ? 1 : 0),
                   "stats.draws":   (Number(s.draws)   || 0) + (result === "draw" ? 1 : 0),
                 });
-                console.log(`Stats updated: uid=${player.uid} result=${result} - server.js:1548`);
+                console.log(`Stats updated: uid=${player.uid} result=${result} - server.js:1551`);
               } catch (e) {
-                console.error(`Stats update failed for uid=${player.uid}: - server.js:1550`, e.message);
+                console.error(`Stats update failed for uid=${player.uid}: - server.js:1553`, e.message);
               }
             })
         );
@@ -1558,12 +1561,12 @@ app.post("/update-match-score", adminActionLimiter, requireLeagueOwnerOrAdmin, a
         updateTeamPlayers(teamBSnap, resultB),
       ]);
 
-      console.log(`Match ${matchId} completed. Stats engine done. A:${sA} B:${sB} - server.js:1561`);
+      console.log(`Match ${matchId} completed. Stats engine done. A:${sA} B:${sB} - server.js:1564`);
     }
 
     res.json({ success: true });
   } catch (e) {
-    console.error("updatematchscore error: - server.js:1566", e);
+    console.error("updatematchscore error: - server.js:1569", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1657,7 +1660,7 @@ app.post("/create-player-profile-order", profileLimiter, requireAuth, async (req
       key:      process.env.KEY_ID,
     });
   } catch (err) {
-    console.error("createplayerprofileorder error: - server.js:1660", err);
+    console.error("createplayerprofileorder error: - server.js:1663", err);
     return res.status(500).json({ success: false, error: err.message || "Could not create order." });
   }
 });
@@ -1751,9 +1754,9 @@ app.post("/verify-player-profile-payment", verifyLimiter, async (req, res) => {
           notes:  { reason: "Playon ID was taken by another user during checkout." },
           speed:  "normal",
         });
-        console.log(`Autorefund issued for profile order ${order_id}  ID taken - server.js:1754`);
+        console.log(`Autorefund issued for profile order ${order_id}  ID taken - server.js:1757`);
       } catch (refundErr) {
-        console.error("Profile order refund failed: - server.js:1756", refundErr.message);
+        console.error("Profile order refund failed: - server.js:1759", refundErr.message);
       }
       await db.collection("pendingProfileOrders").doc(order_id).delete().catch(() => {});
       return res.status(409).json({
@@ -1799,7 +1802,7 @@ app.post("/verify-player-profile-payment", verifyLimiter, async (req, res) => {
 
     return res.json({ success: true, isRenewal: false, expiresAt: newExpiresAt.toISOString() });
   } catch (err) {
-    console.error("verifyplayerprofilepayment error: - server.js:1802", err);
+    console.error("verifyplayerprofilepayment error: - server.js:1805", err);
     return res.status(500).json({ success: false, error: err.message || "Verification failed." });
   }
 });
@@ -1839,7 +1842,7 @@ app.post("/send-reminders", async (req, res) => {
 
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1842", e);
+    console.error("sendreminders error: - server.js:1845", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1881,7 +1884,7 @@ app.post("/send-admin-notification", requireAdminOrOwner, async (req, res) => {
 
     return res.json({ success: true, total, message: "Notifications sent" });
   } catch (e) {
-    console.error("sendadminnotification error: - server.js:1884", e);
+    console.error("sendadminnotification error: - server.js:1887", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1907,7 +1910,7 @@ app.get("/", (req, res) => res.send("Bookora server running ✅"));
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1910", err);
+  console.error("Global Error: - server.js:1913", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -1915,4 +1918,4 @@ app.use((err, req, res, next) => {
 // 🚀 START
 // =======================================================
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on ${PORT} ✅ - server.js:1918`));
+app.listen(PORT, () => console.log(`Server running on ${PORT} ✅ - server.js:1921`));
