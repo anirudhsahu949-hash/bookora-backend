@@ -1152,6 +1152,59 @@ app.delete("/delete-owner/:uid", adminActionLimiter, requireAdminOrOwner, async 
   }
 });
 
+
+//delete user setion button //
+
+app.delete("/delete-my-account", async (req, res) => {
+  try {
+    // 1) Verify Firebase ID token from the Authorization header
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (!token) {
+      return res.status(401).json({ success: false, error: "Missing auth token." });
+    }
+ 
+    let decoded;
+    try {
+      decoded = await admin.auth().verifyIdToken(token);
+    } catch {
+      return res.status(401).json({ success: false, error: "Invalid or expired token." });
+    }
+ 
+    const uid = decoded.uid;
+ 
+    // 2) Load the user doc and check role — only regular users self-delete
+    const userRef  = db.collection("users").doc(uid);
+    const userSnap = await userRef.get();
+ 
+    if (userSnap.exists) {
+      const role = userSnap.data().role;
+      if (role === "owner" || role === "turf-operator" || role === "operator" || role === "admin") {
+        return res.status(403).json({
+          success: false,
+          error: "Business accounts cannot be self-deleted. Please contact support at playonsport03@gmail.com.",
+        });
+      }
+    }
+ 
+    // 3) Delete related personal data (best-effort, never blocks deletion)
+    //    Player profile (Playon Pro), if one exists
+    await db.collection("playerProfiles").doc(uid).delete().catch(() => {});
+ 
+    // 4) Delete the Firestore user document
+    await userRef.delete().catch(() => {});
+ 
+    // 5) Delete the Firebase Auth account (this signs them out everywhere)
+    await admin.auth().deleteUser(uid);
+ 
+    console.log(`🗑️ Account selfdeleted: ${uid} - server.js:1200`);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("deletemyaccount error: - server.js:1203", err);
+    return res.status(500).json({ success: false, error: err.message || "Could not delete account." });
+  }
+});
+
 // =======================================================
 // 🏋️ CREATE GYM MEMBERSHIP ORDER
 // =======================================================
@@ -1224,7 +1277,7 @@ app.post("/create-gym-order", orderLimiter, async (req, res) => {
 
     return res.json({ orderId: order.id, amount: order.amount, currency: order.currency, key: process.env.KEY_ID });
   } catch (err) {
-    console.error("creategymorder error: - server.js:1227", err);
+    console.error("creategymorder error: - server.js:1280", err);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -1300,7 +1353,7 @@ app.post("/verify-gym-payment", verifyLimiter, async (req, res) => {
         await db.collection("promoCodes").doc(orderData.promoId).update({
           usedCount: admin.firestore.FieldValue.increment(1),
         });
-      } catch (e) { console.warn("gym promo usage failed: - server.js:1303", e.message); }
+      } catch (e) { console.warn("gym promo usage failed: - server.js:1356", e.message); }
     }
 
     sendPushToUser(orderData.userId, "🎉 Membership Active!",
@@ -1316,7 +1369,7 @@ app.post("/verify-gym-payment", verifyLimiter, async (req, res) => {
 
     return res.json({ success: true, membershipId });
   } catch (err) {
-    console.error("verifygympayment error: - server.js:1319", err);
+    console.error("verifygympayment error: - server.js:1372", err);
     return res.status(500).json({ success: false, error: err.message || "Verification failed" });
   }
 });
@@ -1365,7 +1418,7 @@ app.post("/create-league", adminActionLimiter, requireLeagueOwnerOrAdmin, async 
 
     res.json({ success: true, leagueId: ref.id });
   } catch (e) {
-    console.error("createleague error: - server.js:1368", e);
+    console.error("createleague error: - server.js:1421", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1433,7 +1486,7 @@ app.post("/add-team", requireLeagueOwnerOrAdmin, async (req, res) => {
       linkedCount: playerUids.length,
     });
   } catch (err) {
-    console.error("addteam error: - server.js:1436", err);
+    console.error("addteam error: - server.js:1489", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -1478,7 +1531,7 @@ app.post("/add-match", adminActionLimiter, requireLeagueOwnerOrAdmin, async (req
 
     res.json({ success: true, matchId: ref.id });
   } catch (e) {
-    console.error("addmatch error: - server.js:1481", e);
+    console.error("addmatch error: - server.js:1534", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1548,9 +1601,9 @@ app.post("/update-match-score", adminActionLimiter, requireLeagueOwnerOrAdmin, a
                   "stats.losses":  (Number(s.losses)  || 0) + (result === "loss" ? 1 : 0),
                   "stats.draws":   (Number(s.draws)   || 0) + (result === "draw" ? 1 : 0),
                 });
-                console.log(`Stats updated: uid=${player.uid} result=${result} - server.js:1551`);
+                console.log(`Stats updated: uid=${player.uid} result=${result} - server.js:1604`);
               } catch (e) {
-                console.error(`Stats update failed for uid=${player.uid}: - server.js:1553`, e.message);
+                console.error(`Stats update failed for uid=${player.uid}: - server.js:1606`, e.message);
               }
             })
         );
@@ -1561,12 +1614,12 @@ app.post("/update-match-score", adminActionLimiter, requireLeagueOwnerOrAdmin, a
         updateTeamPlayers(teamBSnap, resultB),
       ]);
 
-      console.log(`Match ${matchId} completed. Stats engine done. A:${sA} B:${sB} - server.js:1564`);
+      console.log(`Match ${matchId} completed. Stats engine done. A:${sA} B:${sB} - server.js:1617`);
     }
 
     res.json({ success: true });
   } catch (e) {
-    console.error("updatematchscore error: - server.js:1569", e);
+    console.error("updatematchscore error: - server.js:1622", e);
     res.status(400).json({ success: false, error: e.message });
   }
 });
@@ -1660,7 +1713,7 @@ app.post("/create-player-profile-order", profileLimiter, requireAuth, async (req
       key:      process.env.KEY_ID,
     });
   } catch (err) {
-    console.error("createplayerprofileorder error: - server.js:1663", err);
+    console.error("createplayerprofileorder error: - server.js:1716", err);
     return res.status(500).json({ success: false, error: err.message || "Could not create order." });
   }
 });
@@ -1754,9 +1807,9 @@ app.post("/verify-player-profile-payment", verifyLimiter, async (req, res) => {
           notes:  { reason: "Playon ID was taken by another user during checkout." },
           speed:  "normal",
         });
-        console.log(`Autorefund issued for profile order ${order_id}  ID taken - server.js:1757`);
+        console.log(`Autorefund issued for profile order ${order_id}  ID taken - server.js:1810`);
       } catch (refundErr) {
-        console.error("Profile order refund failed: - server.js:1759", refundErr.message);
+        console.error("Profile order refund failed: - server.js:1812", refundErr.message);
       }
       await db.collection("pendingProfileOrders").doc(order_id).delete().catch(() => {});
       return res.status(409).json({
@@ -1802,7 +1855,7 @@ app.post("/verify-player-profile-payment", verifyLimiter, async (req, res) => {
 
     return res.json({ success: true, isRenewal: false, expiresAt: newExpiresAt.toISOString() });
   } catch (err) {
-    console.error("verifyplayerprofilepayment error: - server.js:1805", err);
+    console.error("verifyplayerprofilepayment error: - server.js:1858", err);
     return res.status(500).json({ success: false, error: err.message || "Verification failed." });
   }
 });
@@ -1842,7 +1895,7 @@ app.post("/send-reminders", async (req, res) => {
 
     return res.json({ success: true, sent, total: tomorrowBookings.length });
   } catch (e) {
-    console.error("sendreminders error: - server.js:1845", e);
+    console.error("sendreminders error: - server.js:1898", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1884,7 +1937,7 @@ app.post("/send-admin-notification", requireAdminOrOwner, async (req, res) => {
 
     return res.json({ success: true, total, message: "Notifications sent" });
   } catch (e) {
-    console.error("sendadminnotification error: - server.js:1887", e);
+    console.error("sendadminnotification error: - server.js:1940", e);
     return res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -1910,7 +1963,7 @@ app.get("/", (req, res) => res.send("Bookora server running ✅"));
 // ❌ GLOBAL ERROR HANDLER
 // =======================================================
 app.use((err, req, res, next) => {
-  console.error("Global Error: - server.js:1913", err);
+  console.error("Global Error: - server.js:1966", err);
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
@@ -1918,4 +1971,4 @@ app.use((err, req, res, next) => {
 // 🚀 START
 // =======================================================
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on ${PORT} ✅ - server.js:1921`));
+app.listen(PORT, () => console.log(`Server running on ${PORT} ✅ - server.js:1974`));
