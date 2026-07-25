@@ -2573,35 +2573,39 @@ How to answer:
   // =======================================================
   // 🤖 AI COACH — Anthropic API call
   // =======================================================
-  async function callCoachLLM(systemPrompt, messages) {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error("Coach is not configured yet — missing ANTHROPIC_API_KEY.");
-    }
-
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: process.env.COACH_MODEL || "claude-sonnet-5",
-        max_tokens: 700,
-        system: systemPrompt,
-        messages,
-      }),
-    });
-
-    if (!response.ok) {
-      const errText = await response.text().catch(() => "");
-      throw new Error(`Coach API error ${response.status}: ${errText.slice(0, 200)}`);
-    }
-
-    const data = await response.json();
-    const textBlock = Array.isArray(data.content) ? data.content.find((b) => b.type === "text") : null;
-    return textBlock?.text?.trim() || "Sorry, I couldn't come up with an answer that time — try asking again.";
+ async function callCoachLLM(systemPrompt, messages) {
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error("Coach is not configured yet — missing GEMINI_API_KEY.");
   }
+
+  // Gemini uses "model" for assistant turns, not "assistant"
+  const contents = messages.map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }],
+  }));
+
+  const model = process.env.COACH_MODEL || "gemini-2.5-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      system_instruction: { parts: [{ text: systemPrompt }] },
+      contents,
+      generationConfig: { maxOutputTokens: 700 },
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    throw new Error(`Coach API error ${response.status}: ${errText.slice(0, 200)}`);
+  }
+
+  const data = await response.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  return text?.trim() || "Sorry, I couldn't come up with an answer that time — try asking again.";
+}
 
   // =======================================================
   // 🤖 AI COACH — send a message, get a reply
@@ -2620,7 +2624,7 @@ How to answer:
         const profSnap = await db.collection("playerProfiles").doc(uid).get();
         if (profSnap.exists) profile = profSnap.data();
       } catch (e) {
-        console.warn("coach profile lookup failed (nonfatal): - server.js:2623", e.message);
+        console.warn("coach profile lookup failed (nonfatal): - server.js:2627", e.message);
       }
 
       const historySnap = await db.collection("coachConversations").doc(uid)
@@ -2652,7 +2656,7 @@ How to answer:
 
       return res.json({ success: true, reply: replyText });
     } catch (err) {
-      console.error("coachchat error: - server.js:2655", err.message);
+      console.error("coachchat error: - server.js:2659", err.message);
       return res.status(500).json({ success: false, error: "The coach is unavailable right now. Please try again in a moment." });
     }
   });
@@ -2668,7 +2672,7 @@ How to answer:
       const messages = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       return res.json({ success: true, messages });
     } catch (err) {
-      console.error("coachhistory error: - server.js:2671", err.message);
+      console.error("coachhistory error: - server.js:2675", err.message);
       return res.status(500).json({ success: false, error: "Could not load conversation history." });
     }
   });
@@ -2685,7 +2689,7 @@ How to answer:
       await batch.commit();
       return res.json({ success: true });
     } catch (err) {
-      console.error("coachclear error: - server.js:2688", err.message);
+      console.error("coachclear error: - server.js:2692", err.message);
       return res.status(500).json({ success: false, error: "Could not clear the conversation." });
     }
   });
@@ -2722,7 +2726,7 @@ How to answer:
 
       return res.json({ success: true, sent, total: tomorrowBookings.length });
     } catch (e) {
-      console.error("sendreminders error: - server.js:2725", e);
+      console.error("sendreminders error: - server.js:2729", e);
       return res.status(500).json({ success: false, error: e.message });
     }
   });
@@ -2764,7 +2768,7 @@ How to answer:
 
       return res.json({ success: true, total, message: "Notifications sent" });
     } catch (e) {
-      console.error("sendadminnotification error: - server.js:2767", e);
+      console.error("sendadminnotification error: - server.js:2771", e);
       return res.status(500).json({ success: false, error: e.message });
     }
   });
@@ -2817,7 +2821,7 @@ How to answer:
         message: `PCoin rate set to ${rate} coins per ₹1000. Enabled: ${enabled !== false}`,
       });
     } catch (err) {
-      console.error("pcoinconfig error: - server.js:2820", err);
+      console.error("pcoinconfig error: - server.js:2824", err);
       return res.status(500).json({ success: false, error: err.message });
     }
   });
@@ -2882,7 +2886,7 @@ How to answer:
         message: `VCoin ${vcoinEnabled ? "enabled" : "disabled"} at ${rate} coins/booking for turf ${turfId}`,
       });
     } catch (err) {
-      console.error("vcoinconfig error: - server.js:2885", err);
+      console.error("vcoinconfig error: - server.js:2889", err);
       return res.status(500).json({ success: false, error: err.message });
     }
   });
@@ -3038,9 +3042,9 @@ How to answer:
           }
 
           credited++;
-          console.log(`🪙 Coins credited: bookingId=${bookingId} pcoin=${pcoinPending} vcoin=${vcoinPending} - server.js:3041`);
+          console.log(`🪙 Coins credited: bookingId=${bookingId} pcoin=${pcoinPending} vcoin=${vcoinPending} - server.js:3045`);
         } catch (e) {
-          console.warn(`Coin credit failed for booking ${docSnap.id}: - server.js:3043`, e.message);
+          console.warn(`Coin credit failed for booking ${docSnap.id}: - server.js:3047`, e.message);
         }
       }));
 
@@ -3050,7 +3054,7 @@ How to answer:
         credited, skipped,
       });
     } catch (err) {
-      console.error("creditcompletedcoins error: - server.js:3053", err);
+      console.error("creditcompletedcoins error: - server.js:3057", err);
       return res.status(500).json({ success: false, error: err.message });
     }
   });
@@ -3063,7 +3067,7 @@ How to answer:
   // ❌ GLOBAL ERROR HANDLER
   // =======================================================
   app.use((err, req, res, next) => {
-    console.error("Global Error: - server.js:3066", err);
+    console.error("Global Error: - server.js:3070", err);
     res.status(500).json({ success: false, error: "Internal server error" });
   });
 
@@ -3071,4 +3075,4 @@ How to answer:
   // 🚀 START
   // =======================================================
   const PORT = process.env.PORT || 5000;
-  app.listen(PORT, () => console.log(`Server running on ${PORT} ✅ - server.js:3074`));
+  app.listen(PORT, () => console.log(`Server running on ${PORT} ✅ - server.js:3078`));
