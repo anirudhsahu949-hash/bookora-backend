@@ -3711,6 +3711,1081 @@ How to answer:
     }
   });
 
+
+  // =======================================================
+  // 🎯 BALL MACHINE — new parallel booking system (added)
+  // =======================================================
+// =============================================================================
+// 🎯 BALL MACHINE — SCHEMA NOTES
+// =============================================================================
+// Turf doc gets these NEW fields (owner sets them in the add/edit turf screen):
+//   ballMachineEnabled       : boolean        — turns the feature on for this venue
+//   ballMachineCount         : number         — how many machines/bays run in parallel
+//   ballMachineOpeningTime   : number (hour)  — falls back to turf.openingTime, then 6
+//   ballMachineClosingTime   : number (hour)  — falls back to turf.closingTime, then 23
+//   ballMachinePackages      : [{ id, label, overs, durationMinutes, price }]
+//        e.g. { id:"p1", label:"6 Overs", overs:6,  durationMinutes:15, price:150 }
+//             { id:"p2", label:"12 Overs", overs:12, durationMinutes:30, price:300 }
+//   (VCoin reuses the turf's EXISTING vcoinEnabled / vcoinRatePerHour fields —
+//    no separate config needed, one venue = one VCoin rate)
+//
+// NEW Firestore collections (parallel to bookings/orders/blockedSlots/slotLocks —
+// deliberately NOT reusing those, so ball machine bugs can never touch turf-slot
+// money math):
+//   ballMachineOrders    — created at checkout, same lifecycle as `orders`
+//   ballMachineBookings  — confirmed sessions, same lifecycle as `bookings`
+//   ballMachineBlocks    — owner-blocked machine time (mirrors `blockedSlots`)
+//   ballMachineLocks     — short-lived holds while a user is checking out
+//                          (mirrors `slotLocks`; write these client-side the
+//                          same way you already do for slotLocks)
+//
+// Time is stored as MINUTES-FROM-MIDNIGHT ("startUnit"), on a fixed 15-minute
+// grid, rather than slot strings — because package duration varies (15 min,
+// 30 min, ...) instead of your turf's fixed 30-min slot. `machineIndex`
+// (1..ballMachineCount) records which bay a booking landed on so multiple
+// machines can run truly in parallel.
+// =============================================================================
+
+const BALL_MACHINE_UNIT_MINUTES = 15;
+
+function getBallMachineWindow(turf) {
+  const openHour  = Number(turf.ballMachineOpeningTime ?? turf.openingTime ?? 6);
+  const closeHour = Number(turf.ballMachineClosingTime ?? turf.closingTime ?? 23);
+  return { startMin: openHour * 60, endMin: closeHour * 60 };
+}
+
+function findBallMachinePackage(turf, packageId) {
+  const packages = Array.isArray(turf.ballMachinePackages) ? turf.ballMachinePackages : [];
+  return packages.find((p) => p.id === packageId) || null;
+}
+
+function rangesOverlap(aStart, aEnd, bStart, bEnd) {
+  return aStart < bEnd && bStart < aEnd;
+}
+
+// Builds a flat list of { machineIndex, start, end } from confirmed bookings +
+// owner blocks + active locks for one turf/date, so availability checks only
+// need one pass. `machineIndex: "all"` (used by blocks) conflicts with every bay.
+async function getBallMachineOccupiedRanges(turfId, dateString, excludeUserId, excludeBookingId) {
+  const [bookingSnap, blockSnap, lockSnap] = await Promise.all([
+    db.collection("ballMachineBookings")
+      .where("turfId", "==", turfId).where("dateString", "==", dateString).get(),
+    db.collection("ballMachineBlocks")
+      .where("turfId", "==", turfId).where("dateString", "==", dateString).get(),
+    db.collection("ballMachineLocks")
+      .where("turfId", "==", turfId).where("dateString", "==", dateString).get(),
+  ]);
+
+  const now = new Date();
+  const ranges = [];
+
+  bookingSnap.docs.forEach((d) => {
+    if (d.id === excludeBookingId) return;
+    const b = d.data();
+    if (b.status === "cancelled") return;
+    ranges.push({ machineIndex: b.machineIndex, start: b.startUnit, end: b.startUnit + b.durationMinutes });
+  });
+
+  blockSnap.docs.forEach((d) => {
+    const b = d.data();
+    ranges.push({
+      machineIndex: b.machineIndex || "all",
+      start: b.startUnit,
+      end: b.startUnit + (b.durationMinutes || BALL_MACHINE_UNIT_MINUTES),
+    });
+  });
+
+  lockSnap.docs.forEach((d) => {
+    const l = d.data();
+    if (l.userId === excludeUserId) return;
+    const expiry = l.expiresAt?.toDate?.() || new Date(l.expiresAt);
+    if (expiry <= now) return;
+    ranges.push({
+      machineIndex: l.machineIndex || "all",
+      start: l.startUnit,
+      end: l.startUnit + (l.durationMinutes || BALL_MACHINE_UNIT_MINUTES),
+    });
+  });
+
+  return ranges;
+}
+
+// Returns the first free machine number (1-indexed) for [start, end), or null.
+function findFreeMachine(occupiedRanges, machineCount, start, end) {
+  for (let m = 1; m <= machineCount; m++) {
+    const conflict = occupiedRanges.some((r) => {
+      if (r.machineIndex !== "all" && Number(r.machineIndex) !== m) return false;
+      return rangesOverlap(start, end, r.start, r.end);
+    });
+    if (!conflict) return m;
+  }
+  return null;
+}
+
+// =============================================================================
+// 📅 GET AVAILABILITY — powers the customer's time picker for a chosen package
+// =============================================================================
+app.get("/ballmachine-availability", async (req, res) => {
+  try {
+    const { turfId, dateString, packageId } = req.query;
+    if (!turfId || !dateString || !packageId) {
+      return res.status(400).json({ success: false, error: "turfId, dateString and packageId are required" });
+    }
+
+    const turfDoc = await db.collection("turfs").doc(String(turfId)).get();
+    if (!turfDoc.exists) return res.status(404).json({ success: false, error: "Turf not found" });
+    const turf = turfDoc.data();
+    if (turf.ballMachineEnabled !== true) {
+      return res.status(400).json({ success: false, error: "Ball Machine is not available at this venue" });
+    }
+
+    const pkg = findBallMachinePackage(turf, String(packageId));
+    if (!pkg) return res.status(400).json({ success: false, error: "Invalid package selected" });
+
+    const durationMinutes = Number(pkg.durationMinutes);
+    const machineCount    = Math.max(1, Number(turf.ballMachineCount || 1));
+    const { startMin, endMin } = getBallMachineWindow(turf);
+
+    const occupied = await getBallMachineOccupiedRanges(String(turfId), String(dateString), null, null);
+
+    const available = [];
+    for (let t = startMin; t + durationMinutes <= endMin; t += BALL_MACHINE_UNIT_MINUTES) {
+      if (findFreeMachine(occupied, machineCount, t, t + durationMinutes)) {
+        available.push({ startUnit: t, startTime: formatMinutes(t), endTime: formatMinutes(t + durationMinutes) });
+      }
+    }
+
+    return res.json({ success: true, package: pkg, durationMinutes, machineCount, available });
+  } catch (err) {
+    console.error("ballmachineavailability error: - server.js:3860", err);
+    return res.status(500).json({ success: false, error: err.message || "Failed to load availability" });
+  }
+});
+
+// =============================================================================
+// ✅ CREATE BALL MACHINE ORDER
+// =============================================================================
+app.post("/create-ballmachine-order", orderLimiter, async (req, res) => {
+  try {
+    const { turfId, dateString, packageId, startUnit, userId } = req.body;
+    if (!turfId || !dateString || !packageId || startUnit === undefined || startUnit === null) {
+      return res.status(400).json({ error: "turfId, dateString, packageId and startUnit are required" });
+    }
+
+    const turfDoc = await db.collection("turfs").doc(turfId).get();
+    if (!turfDoc.exists) return res.status(404).json({ error: "Turf not found" });
+    const turf = turfDoc.data();
+    if (turf.ballMachineEnabled !== true) {
+      return res.status(400).json({ error: "Ball Machine is not available at this venue" });
+    }
+
+    const pkg = findBallMachinePackage(turf, packageId);
+    if (!pkg) return res.status(400).json({ error: "Invalid package selected" });
+
+    const durationMinutes = Number(pkg.durationMinutes);
+    const price           = Number(pkg.price);
+    if (!durationMinutes || durationMinutes <= 0 || !price || price <= 0) {
+      return res.status(400).json({ error: "This package is misconfigured. Please contact the venue." });
+    }
+
+    const start = Number(startUnit);
+    if (isNaN(start) || start % BALL_MACHINE_UNIT_MINUTES !== 0) {
+      return res.status(400).json({ error: "Invalid start time" });
+    }
+    const end = start + durationMinutes;
+    const { startMin, endMin } = getBallMachineWindow(turf);
+    if (start < startMin || end > endMin) {
+      return res.status(400).json({ error: "Selected time is outside operating hours" });
+    }
+
+    const machineCount = Math.max(1, Number(turf.ballMachineCount || 1));
+    const occupied      = await getBallMachineOccupiedRanges(turfId, dateString, userId, null);
+    const freeMachine    = findFreeMachine(occupied, machineCount, start, end);
+    if (!freeMachine) {
+      return res.status(409).json({
+        success: false, slotConflict: true,
+        error: "This time is no longer available. Please pick another slot.",
+      });
+    }
+
+    const order = await razorpay.orders.create({
+      amount: price * 100, currency: "INR", receipt: "bm_" + Date.now(),
+    });
+
+    await db.collection("ballMachineOrders").doc(order.id).set({
+      turfId, turfName: turf.name || "", turfLocation: turf.location || "",
+      image:   Array.isArray(turf.images) && turf.images.length > 0 ? turf.images[0] : turf.image || "",
+      ownerId: turf.ownerId || null, ownerName: turf.ownerName || "",
+      userId:  userId || null,
+      dateString, startUnit: start, durationMinutes,
+      startTime: formatMinutes(start), endTime: formatMinutes(end),
+      packageId: pkg.id, packageLabel: pkg.label || `${pkg.overs} overs`, overs: Number(pkg.overs || 0),
+      price, orderId: order.id,
+      orderStatus: "created", paymentStatus: "pending",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({ orderId: order.id, amount: order.amount, currency: order.currency, key: process.env.KEY_ID });
+  } catch (err) {
+    console.error("createballmachineorder error: - server.js:3930", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// =============================================================================
+// ✅ VERIFY BALL MACHINE PAYMENT
+// =============================================================================
+app.post("/verify-ballmachine-payment", verifyLimiter, async (req, res) => {
+  let order_id = null;
+  let payment_id_outer = null;
+
+  try {
+    const { order_id: incomingOrderId, payment_id, signature } = req.body;
+    order_id         = incomingOrderId;
+    payment_id_outer = payment_id;
+
+    if (!order_id || !payment_id || !signature) {
+      return res.status(400).json({ success: false, error: "Missing fields" });
+    }
+
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.KEY_SECRET)
+      .update(order_id + "|" + payment_id)
+      .digest("hex");
+    if (expectedSignature !== signature) {
+      return res.status(400).json({ success: false, error: "Invalid signature" });
+    }
+
+    const payment = await razorpay.payments.fetch(payment_id);
+    if (payment.status !== "captured") {
+      return res.status(400).json({ success: false, error: "Payment not captured" });
+    }
+
+    const orderRef  = db.collection("ballMachineOrders").doc(order_id);
+    let bookingId    = null;
+    let orderData    = null;
+    let alreadyPaid  = false;
+    let machineIndex = null;
+
+    await db.runTransaction(async (txn) => {
+      const orderDoc = await txn.get(orderRef);
+      if (!orderDoc.exists) throw new Error("Order not found");
+      orderData = orderDoc.data();
+      if (orderData.orderStatus === "paid") { alreadyPaid = true; return; }
+
+      const start = orderData.startUnit;
+      const end   = start + orderData.durationMinutes;
+
+      const bookingSnap = await txn.get(
+        db.collection("ballMachineBookings")
+          .where("turfId", "==", orderData.turfId)
+          .where("dateString", "==", orderData.dateString)
+      );
+      const blockSnap = await txn.get(
+        db.collection("ballMachineBlocks")
+          .where("turfId", "==", orderData.turfId)
+          .where("dateString", "==", orderData.dateString)
+      );
+      const turfDoc = await txn.get(db.collection("turfs").doc(orderData.turfId));
+      const turf    = turfDoc.exists ? turfDoc.data() : {};
+      const machineCount = Math.max(1, Number(turf.ballMachineCount || 1));
+
+      const occupied = [];
+      bookingSnap.docs.forEach((d) => {
+        const b = d.data();
+        if (b.status === "cancelled") return;
+        occupied.push({ machineIndex: b.machineIndex, start: b.startUnit, end: b.startUnit + b.durationMinutes });
+      });
+      blockSnap.docs.forEach((d) => {
+        const b = d.data();
+        occupied.push({
+          machineIndex: b.machineIndex || "all",
+          start: b.startUnit,
+          end: b.startUnit + (b.durationMinutes || BALL_MACHINE_UNIT_MINUTES),
+        });
+      });
+
+      const freeMachine = findFreeMachine(occupied, machineCount, start, end);
+      if (!freeMachine) {
+        throw new Error("SLOT_CONFLICT: This time is no longer available");
+      }
+      machineIndex = freeMachine;
+
+      bookingId = `${orderData.turfId}_bm_${Date.now()}`;
+      const bookingRef  = db.collection("ballMachineBookings").doc(bookingId);
+      const parsedDate  = new Date(orderData.dateString);
+      const bookingDate = admin.firestore.Timestamp.fromDate(isNaN(parsedDate.getTime()) ? new Date() : parsedDate);
+
+      txn.set(bookingRef, {
+        turfId: orderData.turfId, turfName: orderData.turfName, turfLocation: orderData.turfLocation,
+        image: orderData.image, ownerId: orderData.ownerId, ownerName: orderData.ownerName,
+        userId: orderData.userId || null, userName: "", userPhone: "", userEmail: "",
+        date: bookingDate, dateString: orderData.dateString,
+        startUnit: start, durationMinutes: orderData.durationMinutes,
+        startTime: orderData.startTime, endTime: orderData.endTime,
+        machineIndex: freeMachine,
+        packageId: orderData.packageId, packageLabel: orderData.packageLabel, overs: orderData.overs,
+        price: orderData.price, paidAmount: orderData.price,
+        paymentId: payment_id, orderId: order_id,
+        status: "confirmed", paymentStatus: "paid", verificationStatus: "verified",
+        ownerSettlementStatus: "pending",
+        refundStatus: "not_applicable", refundAmount: 0,
+        cancelledAt: null, cancelledBy: null, cancellationReason: null,
+        rescheduled: false, rescheduleCount: 0,
+        pcoinPending: 0, vcoinPending: 0, coinStatus: "pending",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      txn.update(orderRef, {
+        orderStatus: "paid", paymentId: payment_id, paymentStatus: "paid",
+        verificationStatus: "verified", paidAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    if (alreadyPaid) {
+      try {
+        const existing = await db.collection("ballMachineBookings").where("orderId", "==", order_id).limit(1).get();
+        return res.json({ success: true, bookingId: existing.empty ? null : existing.docs[0].id });
+      } catch {
+        return res.json({ success: true, bookingId: null });
+      }
+    }
+
+    // ── User info ──────────────────────────────────────────────────────────
+    let userName = "", userPhone = "", userEmail = "";
+    if (orderData.userId) {
+      try {
+        const userDoc = await db.collection("users").doc(orderData.userId).get();
+        if (userDoc.exists) {
+          const u = userDoc.data();
+          userName = u.name || ""; userPhone = u.phone || ""; userEmail = u.email || "";
+        }
+      } catch (e) { console.warn("Could not fetch user: - server.js:4063", e.message); }
+      if (userName && bookingId) {
+        db.collection("ballMachineBookings").doc(bookingId)
+          .update({ userName, userPhone, userEmail }).catch(() => {});
+      }
+    }
+
+    // ── Lock cleanup ───────────────────────────────────────────────────────
+    try {
+      const lockSnap = await db.collection("ballMachineLocks")
+        .where("turfId", "==", orderData.turfId)
+        .where("dateString", "==", orderData.dateString)
+        .where("userId", "==", orderData.userId)
+        .get();
+      await Promise.all(
+        lockSnap.docs
+          .filter((d) => d.data().startUnit === orderData.startUnit)
+          .map((d) => d.ref.delete())
+      );
+    } catch (e) { console.warn("BM lock cleanup failed: - server.js:4082", e.message); }
+
+    // =========================================================================
+    // 🪙 COIN EARN — PENDING (credited after session ends, via cron)
+    // Same rate config as turf bookings: PCoin from settings/pcoinConfig,
+    // VCoin from the turf's own vcoinEnabled/vcoinRatePerHour. Duration is
+    // in minutes here (15/30 min) rather than half-hour slots, so we convert
+    // to a fraction of an hour before applying the hourly rate.
+    // =========================================================================
+    let pcoinPending = 0, vcoinPending = 0;
+    if (orderData.userId && bookingId) {
+      try {
+        const bookingHours = Number(orderData.durationMinutes || 0) / 60;
+
+        const pcoinConfigSnap = await db.collection("settings").doc("pcoinConfig").get();
+        if (pcoinConfigSnap.exists) {
+          const cfg = pcoinConfigSnap.data();
+          if (cfg.enabled !== false && Number(cfg.ratePerHour || 0) > 0 && bookingHours > 0) {
+            pcoinPending = Math.floor(bookingHours * Number(cfg.ratePerHour));
+          }
+        }
+
+        const turfSnap = await db.collection("turfs").doc(orderData.turfId).get();
+        if (turfSnap.exists) {
+          const turfData = turfSnap.data();
+          if (turfData.vcoinEnabled === true && Number(turfData.vcoinRatePerHour || 0) > 0 && bookingHours > 0) {
+            vcoinPending = Math.floor(bookingHours * Number(turfData.vcoinRatePerHour));
+          }
+        }
+
+        const coinUpdate = { coinStatus: "pending" };
+        if (pcoinPending > 0) coinUpdate.pcoinPending = pcoinPending;
+        if (vcoinPending > 0) coinUpdate.vcoinPending = vcoinPending;
+        await db.collection("ballMachineBookings").doc(bookingId).update(coinUpdate)
+          .catch((e) => console.warn("BM coin booking update failed: - server.js:4116", e.message));
+
+        if (pcoinPending > 0) {
+          const pcWalletRef = db.collection("pcoinWallets").doc(orderData.userId);
+          await db.runTransaction(async (txn) => {
+            const snap = await txn.get(pcWalletRef);
+            if (snap.exists) {
+              txn.update(pcWalletRef, {
+                pendingBalance: admin.firestore.FieldValue.increment(pcoinPending),
+                updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+              });
+            } else {
+              txn.set(pcWalletRef, {
+                uid: orderData.userId, balance: 0, pendingBalance: pcoinPending,
+                totalEarned: 0, totalRedeemed: 0,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
+            }
+          });
+          await db.collection("pcoinLedger").add({
+            uid: orderData.userId, type: "pcoin_earn_pending", coins: pcoinPending,
+            bookingId, bookingType: "ball_machine", turfId: orderData.turfId, turfName: orderData.turfName || "",
+            note: "Ball Machine — pending, will credit after session ends",
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+
+        if (vcoinPending > 0) {
+          const vcWalletKey = `${orderData.userId}_${orderData.turfId}`;
+          const vcWalletRef = db.collection("vcoinWallets").doc(vcWalletKey);
+          await db.runTransaction(async (txn) => {
+            const snap = await txn.get(vcWalletRef);
+            if (snap.exists) {
+              txn.update(vcWalletRef, {
+                pendingBalance: admin.firestore.FieldValue.increment(vcoinPending),
+                updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+              });
+            } else {
+              txn.set(vcWalletRef, {
+                uid: orderData.userId, turfId: orderData.turfId, turfName: orderData.turfName || "",
+                balance: 0, pendingBalance: vcoinPending, totalEarned: 0, totalRedeemed: 0,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
+            }
+          });
+          await db.collection("vcoinLedger").add({
+            uid: orderData.userId, type: "vcoin_earn_pending", coins: vcoinPending,
+            bookingId, bookingType: "ball_machine", turfId: orderData.turfId, turfName: orderData.turfName || "",
+            note: "Ball Machine — pending, will credit after session ends",
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+
+        console.log(`🪙 BM coins pending: pcoin=${pcoinPending} vcoin=${vcoinPending} bookingId=${bookingId} - server.js:4171`);
+      } catch (coinErr) {
+        console.warn("BM coin pending earn failed (nonfatal): - server.js:4173", coinErr.message);
+      }
+    }
+    // ── END COIN EARN ─────────────────────────────────────────────────────
+
+    const dateOnly = orderData.dateString?.split(" ").slice(0, 3).join(" ") || orderData.dateString;
+
+    sendPushToUser(orderData.userId, "🎯 Ball Machine Booked!",
+      `Your ${orderData.overs}-over session at ${orderData.turfName} on ${dateOnly} from ${orderData.startTime} is confirmed.`,
+      { screen: "bookings", bookingId }
+    );
+    if (orderData.ownerId) {
+      sendPushToUser(orderData.ownerId, "🎯 New Ball Machine Booking",
+        `${userName || "A user"} booked a ${orderData.overs}-over session at ${orderData.turfName} on ${dateOnly} from ${orderData.startTime}.`,
+        { screen: "owner-bookings", bookingId }
+      );
+    }
+
+    return res.json({ success: true, bookingId, machineIndex, pcoinPending, vcoinPending });
+
+  } catch (err) {
+    console.error("verifyballmachinepayment error: - server.js:4194", err);
+
+    if (err.message?.startsWith("SLOT_CONFLICT") && payment_id_outer) {
+      try {
+        const payment = await razorpay.payments.fetch(payment_id_outer);
+        if (payment.status === "captured") {
+          const refund = await razorpay.payments.refund(payment_id_outer, {
+            amount: payment.amount, notes: { reason: err.message }, speed: "normal",
+          });
+          if (order_id) {
+            await db.collection("ballMachineOrders").doc(order_id).update({
+              orderStatus: "refunded", paymentStatus: "refunded",
+              refundId: refund.id, refundReason: err.message,
+              refundedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }).catch(() => {});
+          }
+          return res.status(409).json({
+            success: false, error: err.message.replace("SLOT_CONFLICT: ", ""),
+            autoRefunded: true, refundId: refund.id,
+            message: "This time is no longer available. Your payment has been refunded automatically. It will reflect in 5–7 business days.",
+          });
+        }
+      } catch (refundErr) {
+        console.error("BM autorefund failed: - server.js:4217", refundErr.message);
+        return res.status(409).json({
+          success: false, error: err.message.replace("SLOT_CONFLICT: ", ""),
+          autoRefunded: false,
+          message: "Slot unavailable. Refund could not be processed automatically — please contact support.",
+        });
+      }
+    }
+
+    try {
+      if (order_id) {
+        const orderDoc = await db.collection("ballMachineOrders").doc(order_id).get();
+        if (orderDoc.exists && orderDoc.data().orderStatus !== "paid") {
+          await db.collection("ballMachineOrders").doc(order_id).update({
+            orderStatus: "failed", paymentStatus: "failed",
+            failedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+      }
+    } catch (e) { console.warn("BM failed order update: - server.js:4236", e.message); }
+
+    return res.status(500).json({ success: false, error: err.message || "Verification failed" });
+  }
+});
+
+// =============================================================================
+// ✅ CANCEL BALL MACHINE BOOKING (user-initiated)
+// =============================================================================
+app.post("/cancel-ballmachine-booking", cancelLimiter, async (req, res) => {
+  try {
+    const { bookingId, userId, reason } = req.body;
+    if (!bookingId || !userId) {
+      return res.status(400).json({ success: false, error: "bookingId and userId are required" });
+    }
+
+    const bookingRef = db.collection("ballMachineBookings").doc(bookingId);
+    const bookingDoc = await bookingRef.get();
+    if (!bookingDoc.exists) return res.status(404).json({ success: false, error: "Booking not found" });
+    const booking = bookingDoc.data();
+
+    if (booking.userId !== userId) {
+      return res.status(403).json({ success: false, error: "You are not authorised to cancel this booking" });
+    }
+    if (booking.status === "cancelled") {
+      return res.status(400).json({ success: false, error: "This booking is already cancelled" });
+    }
+
+    const bookingDate  = booking.date?.toDate ? booking.date.toDate() : new Date(booking.dateString);
+    const sessionStart = new Date(bookingDate);
+    sessionStart.setHours(0, 0, 0, 0);
+    sessionStart.setMinutes(Number(booking.startUnit || 0));
+
+    const cancellationWindowHours = await getCancellationWindowHours();
+    if (cancellationWindowHours > 0) {
+      const hoursUntil = (sessionStart.getTime() - Date.now()) / (1000 * 60 * 60);
+      if (hoursUntil < cancellationWindowHours) {
+        return res.status(400).json({
+          success: false,
+          error: `Cancellations are not allowed within ${cancellationWindowHours} hours of the session start time`,
+          hoursUntilSlot: Math.round(hoursUntil * 10) / 10,
+          requiredHours: cancellationWindowHours,
+        });
+      }
+    }
+
+    const paidAmount   = Number(booking.paidAmount || booking.price || 0);
+    const paymentId    = booking.paymentId || null;
+    const wasOnline    = !!paymentId;
+    const refundAmount = wasOnline ? paidAmount : 0;
+
+    await bookingRef.update({
+      status:                "cancelled",
+      cancelledAt:           admin.firestore.FieldValue.serverTimestamp(),
+      cancelledBy:           "user",
+      cancellationReason:    reason || "User requested cancellation",
+      refundStatus:          wasOnline ? "pending" : "not_applicable",
+      refundAmount,
+      ownerSettlementStatus: "cancelled",
+    });
+
+    let refundId = null, refundNote = "no_refund";
+    if (wasOnline && refundAmount > 0) {
+      try {
+        const refund = await razorpay.payments.refund(paymentId, {
+          amount: refundAmount * 100,
+          notes:  { bookingId, reason: reason || "User cancelled Ball Machine booking" },
+          speed:  "normal",
+        });
+        refundId   = refund.id;
+        refundNote = "refund_initiated";
+        await bookingRef.update({
+          refundId, refundStatus: "initiated",
+          refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      } catch (refundError) {
+        console.error("BM refund error: - server.js:4312", refundError.message);
+        await bookingRef.update({ refundStatus: "failed", refundError: refundError.message });
+        refundNote = "refund_failed";
+      }
+    }
+
+    // ── Coin reversal (pending EARN only — packages are flat-price, no coin
+    //    redemption on ball machine bookings, so there's nothing to refund back) ──
+    try {
+      const pcoinPending = Number(booking.pcoinPending || 0);
+      const vcoinPending = Number(booking.vcoinPending || 0);
+
+      if (pcoinPending > 0 && userId) {
+        const pcWalletRef = db.collection("pcoinWallets").doc(userId);
+        await db.runTransaction(async (txn) => {
+          const snap = await txn.get(pcWalletRef);
+          if (!snap.exists) return;
+          const current = Number(snap.data().pendingBalance || 0);
+          txn.update(pcWalletRef, {
+            pendingBalance: Math.max(current - pcoinPending, 0),
+            updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+          });
+        });
+        await db.collection("pcoinLedger").add({
+          uid: userId, type: "pcoin_earn_reversed", coins: pcoinPending, bookingId,
+          bookingType: "ball_machine", turfId: booking.turfId || "", turfName: booking.turfName || "",
+          note: "Ball Machine booking cancelled — pending coins reversed",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+
+      if (vcoinPending > 0 && userId && booking.turfId) {
+        const vcWalletRef = db.collection("vcoinWallets").doc(`${userId}_${booking.turfId}`);
+        await db.runTransaction(async (txn) => {
+          const snap = await txn.get(vcWalletRef);
+          if (!snap.exists) return;
+          const current = Number(snap.data().pendingBalance || 0);
+          txn.update(vcWalletRef, {
+            pendingBalance: Math.max(current - vcoinPending, 0),
+            updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+          });
+        });
+        await db.collection("vcoinLedger").add({
+          uid: userId, type: "vcoin_earn_reversed", coins: vcoinPending, bookingId,
+          bookingType: "ball_machine", turfId: booking.turfId, turfName: booking.turfName || "",
+          note: "Ball Machine booking cancelled — pending coins reversed",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+
+      if (pcoinPending > 0 || vcoinPending > 0) {
+        await bookingRef.update({ pcoinPending: 0, vcoinPending: 0, coinStatus: "cancelled" }).catch(() => {});
+      }
+    } catch (coinErr) {
+      console.warn("BM coin reversal failed (nonfatal): - server.js:4366", coinErr.message);
+    }
+
+    sendPushToUser(userId, "❌ Ball Machine Booking Cancelled",
+      wasOnline && refundAmount > 0
+        ? `Your Ball Machine session at ${booking.turfName} was cancelled. ₹${refundAmount} refund initiated (5–7 business days).`
+        : `Your Ball Machine session at ${booking.turfName} on ${booking.dateString} has been cancelled.`,
+      { screen: "bookings", bookingId }
+    );
+    if (booking.ownerId) {
+      sendPushToUser(booking.ownerId, "🔔 Ball Machine Booking Cancelled",
+        `${booking.userName || "A user"} cancelled their Ball Machine session at ${booking.turfName} on ${booking.dateString}.`,
+        { screen: "owner-bookings" }
+      );
+    }
+
+    return res.json({
+      success: true, bookingId, refundStatus: refundNote, refundAmount, refundId,
+      message: wasOnline && refundAmount > 0
+        ? `Booking cancelled. ₹${refundAmount} refund has been initiated and will reflect in 5-7 business days.`
+        : "Booking cancelled successfully.",
+    });
+  } catch (err) {
+    console.error("cancelballmachinebooking error: - server.js:4389", err);
+    return res.status(500).json({ success: false, error: err.message || "Cancellation failed. Please try again." });
+  }
+});
+
+// =============================================================================
+// ✅ OWNER/ADMIN CANCEL BALL MACHINE BOOKING
+// =============================================================================
+app.post("/owner-cancel-ballmachine-booking", adminActionLimiter, requireAdminOrOwner, async (req, res) => {
+  try {
+    const { bookingId, reason, note } = req.body;
+    if (!bookingId) return res.status(400).json({ success: false, error: "bookingId is required" });
+    if (!reason || !String(reason).trim()) {
+      return res.status(400).json({ success: false, error: "A cancellation reason is required." });
+    }
+
+    const bookingRef = db.collection("ballMachineBookings").doc(bookingId);
+    const bookingDoc = await bookingRef.get();
+    if (!bookingDoc.exists) return res.status(404).json({ success: false, error: "Booking not found" });
+    const booking = bookingDoc.data();
+
+    if (req.callerRole !== "admin" && booking.ownerId !== req.callerUid) {
+      return res.status(403).json({ success: false, error: "You can only cancel bookings on your own venue." });
+    }
+    if (booking.status === "cancelled") {
+      return res.status(400).json({ success: false, error: "This booking is already cancelled." });
+    }
+
+    const paidAmount   = Number(booking.paidAmount || booking.price || 0);
+    const paymentId    = booking.paymentId || null;
+    const wasOnline    = !!paymentId;
+    const refundAmount = wasOnline ? paidAmount : 0;
+
+    await bookingRef.update({
+      status:                "cancelled",
+      cancelledAt:           admin.firestore.FieldValue.serverTimestamp(),
+      cancelledBy:           req.callerRole === "admin" ? "admin" : "owner",
+      cancellationReason:    String(reason).trim(),
+      ownerCancelNote:       note ? String(note).trim() : "",
+      refundStatus:          wasOnline ? "pending" : "not_applicable",
+      refundAmount,
+      ownerSettlementStatus: "cancelled",
+    });
+
+    let refundId = null, refundNote = "no_refund";
+    if (wasOnline && refundAmount > 0) {
+      try {
+        const refund = await razorpay.payments.refund(paymentId, {
+          amount: refundAmount * 100,
+          notes:  { bookingId, reason: `Owner cancelled: ${reason}` },
+          speed:  "normal",
+        });
+        refundId   = refund.id;
+        refundNote = "refund_initiated";
+        await bookingRef.update({
+          refundId, refundStatus: "initiated",
+          refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      } catch (refundErr) {
+        console.error("Owner BM cancel refund failed: - server.js:4448", refundErr.message);
+        await bookingRef.update({ refundStatus: "failed", refundError: refundErr.message });
+        refundNote = "refund_failed";
+      }
+    }
+
+    try {
+      const pcoinPending = Number(booking.pcoinPending || 0);
+      const vcoinPending = Number(booking.vcoinPending || 0);
+      const uid = booking.userId;
+
+      if (pcoinPending > 0 && uid) {
+        const pcWalletRef = db.collection("pcoinWallets").doc(uid);
+        await db.runTransaction(async (txn) => {
+          const snap = await txn.get(pcWalletRef);
+          if (!snap.exists) return;
+          const current = Number(snap.data().pendingBalance || 0);
+          txn.update(pcWalletRef, {
+            pendingBalance: Math.max(current - pcoinPending, 0),
+            updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+          });
+        });
+        await db.collection("pcoinLedger").add({
+          uid, type: "pcoin_earn_reversed", coins: pcoinPending, bookingId,
+          bookingType: "ball_machine", turfId: booking.turfId || "", turfName: booking.turfName || "",
+          note: "Ball Machine booking cancelled by venue — pending coins reversed",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+
+      if (vcoinPending > 0 && uid && booking.turfId) {
+        const vcWalletRef = db.collection("vcoinWallets").doc(`${uid}_${booking.turfId}`);
+        await db.runTransaction(async (txn) => {
+          const snap = await txn.get(vcWalletRef);
+          if (!snap.exists) return;
+          const current = Number(snap.data().pendingBalance || 0);
+          txn.update(vcWalletRef, {
+            pendingBalance: Math.max(current - vcoinPending, 0),
+            updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+          });
+        });
+        await db.collection("vcoinLedger").add({
+          uid, type: "vcoin_earn_reversed", coins: vcoinPending, bookingId,
+          bookingType: "ball_machine", turfId: booking.turfId, turfName: booking.turfName || "",
+          note: "Ball Machine booking cancelled by venue — pending coins reversed",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+
+      if (pcoinPending > 0 || vcoinPending > 0) {
+        await bookingRef.update({ pcoinPending: 0, vcoinPending: 0, coinStatus: "cancelled" }).catch(() => {});
+      }
+    } catch (coinErr) {
+      console.warn("Owner BM cancel coin reversal failed (nonfatal): - server.js:4501", coinErr.message);
+    }
+
+    sendPushToUser(booking.userId, "❌ Ball Machine Booking Cancelled by Venue",
+      wasOnline && refundAmount > 0
+        ? `Your Ball Machine session at ${booking.turfName} on ${booking.dateString} was cancelled by the venue. Reason: ${reason}. ₹${refundAmount} refund initiated (5–7 business days).`
+        : `Your Ball Machine session at ${booking.turfName} on ${booking.dateString} was cancelled by the venue. Reason: ${reason}.`,
+      { screen: "bookings", bookingId }
+    );
+
+    return res.json({
+      success: true, bookingId, refundStatus: refundNote, refundAmount, refundId,
+      message: wasOnline && refundAmount > 0
+        ? `Booking cancelled. ₹${refundAmount} refund initiated to the customer.`
+        : "Booking cancelled successfully.",
+    });
+  } catch (err) {
+    console.error("ownercancelballmachinebooking error: - server.js:4518", err);
+    return res.status(500).json({ success: false, error: err.message || "Cancellation failed." });
+  }
+});
+
+// =============================================================================
+// 🔁 OWNER/ADMIN RESCHEDULE BALL MACHINE BOOKING
+// - Duration stays fixed to the original package (keeps price intact)
+// - Player just moves to a new date/time; machine bay is re-assigned to
+//   whichever bay is free at the new time
+// =============================================================================
+app.post("/owner-reschedule-ballmachine-booking", adminActionLimiter, requireAdminOrOwner, async (req, res) => {
+  try {
+    const { bookingId, newDateString, newStartUnit, reason } = req.body;
+
+    if (!bookingId) return res.status(400).json({ success: false, error: "bookingId is required" });
+    if (!newDateString || !String(newDateString).trim()) {
+      return res.status(400).json({ success: false, error: "newDateString is required" });
+    }
+    if (newStartUnit === undefined || newStartUnit === null || isNaN(Number(newStartUnit))) {
+      return res.status(400).json({ success: false, error: "newStartUnit is required" });
+    }
+
+    const bookingRef = db.collection("ballMachineBookings").doc(bookingId);
+    const bookingDoc = await bookingRef.get();
+    if (!bookingDoc.exists) return res.status(404).json({ success: false, error: "Booking not found" });
+    const booking = bookingDoc.data();
+
+    if (req.callerRole !== "admin" && booking.ownerId !== req.callerUid) {
+      return res.status(403).json({ success: false, error: "You can only reschedule bookings on your own venue." });
+    }
+    if (booking.status === "cancelled") {
+      return res.status(400).json({ success: false, error: "Cannot reschedule a cancelled booking." });
+    }
+
+    const newDate = new Date(newDateString);
+    if (isNaN(newDate.getTime())) {
+      return res.status(400).json({ success: false, error: "Invalid new date." });
+    }
+    const newDay = new Date(newDate); newDay.setHours(0, 0, 0, 0);
+    const today  = new Date(); today.setHours(0, 0, 0, 0);
+    if (newDay < today) {
+      return res.status(400).json({ success: false, error: "Cannot reschedule to a past date." });
+    }
+
+    const newStart = Number(newStartUnit);
+    if (newStart % BALL_MACHINE_UNIT_MINUTES !== 0) {
+      return res.status(400).json({ success: false, error: "Invalid start time." });
+    }
+    const durationMinutes = Number(booking.durationMinutes || 0);
+    const newEnd = newStart + durationMinutes;
+
+    const turfDoc = await db.collection("turfs").doc(booking.turfId).get();
+    const turf    = turfDoc.exists ? turfDoc.data() : {};
+    const { startMin, endMin } = getBallMachineWindow(turf);
+    if (newStart < startMin || newEnd > endMin) {
+      return res.status(400).json({ success: false, error: "Selected time is outside operating hours." });
+    }
+    const machineCount = Math.max(1, Number(turf.ballMachineCount || 1));
+
+    await db.runTransaction(async (txn) => {
+      const bookingSnap = await txn.get(
+        db.collection("ballMachineBookings")
+          .where("turfId", "==", booking.turfId)
+          .where("dateString", "==", newDateString)
+      );
+      const blockSnap = await txn.get(
+        db.collection("ballMachineBlocks")
+          .where("turfId", "==", booking.turfId)
+          .where("dateString", "==", newDateString)
+      );
+
+      const occupied = [];
+      bookingSnap.docs.forEach((d) => {
+        if (d.id === bookingId) return;
+        const b = d.data();
+        if (b.status === "cancelled") return;
+        occupied.push({ machineIndex: b.machineIndex, start: b.startUnit, end: b.startUnit + b.durationMinutes });
+      });
+      blockSnap.docs.forEach((d) => {
+        const b = d.data();
+        occupied.push({
+          machineIndex: b.machineIndex || "all",
+          start: b.startUnit,
+          end: b.startUnit + (b.durationMinutes || BALL_MACHINE_UNIT_MINUTES),
+        });
+      });
+
+      const freeMachine = findFreeMachine(occupied, machineCount, newStart, newEnd);
+      if (!freeMachine) {
+        throw new Error("SLOT_CONFLICT: No machine free at this new time");
+      }
+
+      const parsedDate = new Date(newDateString);
+      txn.update(bookingRef, {
+        dateString: newDateString,
+        date:       admin.firestore.Timestamp.fromDate(isNaN(parsedDate.getTime()) ? new Date() : parsedDate),
+        startUnit:  newStart,
+        startTime:  formatMinutes(newStart),
+        endTime:    formatMinutes(newEnd),
+        machineIndex: freeMachine,
+        rescheduled:   true,
+        rescheduleCount: admin.firestore.FieldValue.increment(1),
+        rescheduleHistory: admin.firestore.FieldValue.arrayUnion({
+          fromDate:      booking.dateString || "",
+          fromStartTime: booking.startTime || "",
+          toDate:        newDateString,
+          toStartTime:   formatMinutes(newStart),
+          by:            req.callerRole === "admin" ? "admin" : "owner",
+          reason:        reason ? String(reason).trim() : "",
+          at:            new Date().toISOString(),
+        }),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    sendPushToUser(booking.userId, "🔁 Ball Machine Booking Rescheduled",
+      `Your Ball Machine session at ${booking.turfName} has been moved to ${newDateString}, ${formatMinutes(newStart)}.${reason ? ` Reason: ${reason}` : ""}`,
+      { screen: "bookings", bookingId }
+    );
+
+    return res.json({
+      success: true, bookingId, newDateString,
+      newStartTime: formatMinutes(newStart), newEndTime: formatMinutes(newEnd),
+      message: "Booking rescheduled successfully. The customer has been notified.",
+    });
+  } catch (err) {
+    console.error("ownerrescheduleballmachinebooking error: - server.js:4645", err);
+    if (err.message?.startsWith("SLOT_CONFLICT")) {
+      return res.status(409).json({
+        success: false, slotConflict: true,
+        error: err.message.replace("SLOT_CONFLICT: ", ""),
+      });
+    }
+    return res.status(500).json({ success: false, error: err.message || "Reschedule failed." });
+  }
+});
+
+// =============================================================================
+// 🪙 CREDIT COMPLETED BALL MACHINE COINS (cron — call alongside your existing
+// /credit-completed-coins on the same schedule, with the same x-cron-secret)
+// =============================================================================
+app.post("/credit-completed-ballmachine-coins", async (req, res) => {
+  if (!process.env.CRON_SECRET || req.headers["x-cron-secret"] !== process.env.CRON_SECRET) {
+    return res.status(401).json({ success: false, error: "Unauthorized" });
+  }
+
+  try {
+    const now = new Date();
+    const snap = await db.collection("ballMachineBookings")
+      .where("coinStatus", "==", "pending")
+      .where("status", "==", "confirmed")
+      .get();
+
+    let credited = 0, skipped = 0;
+
+    await Promise.allSettled(snap.docs.map(async (docSnap) => {
+      const booking   = docSnap.data();
+      const bookingId = docSnap.id;
+
+      try {
+        const bookingDate = booking.date?.toDate ? booking.date.toDate() : new Date(booking.dateString);
+        const sessionEnd  = new Date(bookingDate);
+        sessionEnd.setHours(0, 0, 0, 0);
+        sessionEnd.setMinutes(Number(booking.startUnit || 0) + Number(booking.durationMinutes || 0));
+
+        if (sessionEnd > now) { skipped++; return; }
+
+        const pcoinPending = Number(booking.pcoinPending || 0);
+        const vcoinPending = Number(booking.vcoinPending || 0);
+        const uid = booking.userId;
+        if (!uid) return;
+
+        if (pcoinPending > 0) {
+          const pcWalletRef = db.collection("pcoinWallets").doc(uid);
+          await db.runTransaction(async (txn) => {
+            const wSnap = await txn.get(pcWalletRef);
+            if (wSnap.exists) {
+              const curr    = wSnap.data();
+              const pending = Math.max(Number(curr.pendingBalance || 0) - pcoinPending, 0);
+              txn.update(pcWalletRef, {
+                balance:        admin.firestore.FieldValue.increment(pcoinPending),
+                pendingBalance: pending,
+                totalEarned:    admin.firestore.FieldValue.increment(pcoinPending),
+                updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+              });
+            } else {
+              txn.set(pcWalletRef, {
+                uid, balance: pcoinPending, pendingBalance: 0,
+                totalEarned: pcoinPending, totalRedeemed: 0,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
+            }
+          });
+          await db.collection("pcoinLedger").add({
+            uid, type: "pcoin_earn", coins: pcoinPending, bookingId,
+            bookingType: "ball_machine", turfId: booking.turfId, turfName: booking.turfName || "",
+            note: "Credited after Ball Machine session completed",
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+
+        if (vcoinPending > 0 && booking.turfId) {
+          const vcKey    = `${uid}_${booking.turfId}`;
+          const vcWalRef = db.collection("vcoinWallets").doc(vcKey);
+          await db.runTransaction(async (txn) => {
+            const wSnap = await txn.get(vcWalRef);
+            if (wSnap.exists) {
+              const curr    = wSnap.data();
+              const pending = Math.max(Number(curr.pendingBalance || 0) - vcoinPending, 0);
+              txn.update(vcWalRef, {
+                balance:        admin.firestore.FieldValue.increment(vcoinPending),
+                pendingBalance: pending,
+                totalEarned:    admin.firestore.FieldValue.increment(vcoinPending),
+                updatedAt:      admin.firestore.FieldValue.serverTimestamp(),
+              });
+            } else {
+              txn.set(vcWalRef, {
+                uid, turfId: booking.turfId, turfName: booking.turfName || "",
+                balance: vcoinPending, pendingBalance: 0,
+                totalEarned: vcoinPending, totalRedeemed: 0,
+                createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
+            }
+          });
+          await db.collection("vcoinLedger").add({
+            uid, type: "vcoin_earn", coins: vcoinPending, bookingId,
+            bookingType: "ball_machine", turfId: booking.turfId, turfName: booking.turfName || "",
+            note: "Credited after Ball Machine session completed",
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+
+        await docSnap.ref.update({
+          pcoinEarned: pcoinPending, vcoinEarned: vcoinPending,
+          pcoinPending: 0, vcoinPending: 0,
+          coinStatus: "credited",
+          coinCreditedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        if (pcoinPending > 0 || vcoinPending > 0) {
+          const parts = [];
+          if (pcoinPending > 0) parts.push(`${pcoinPending} PCoin`);
+          if (vcoinPending > 0) parts.push(`${vcoinPending} VCoin`);
+          sendPushToUser(uid, "🪙 Coins Credited!",
+            `${parts.join(" + ")} added to your wallet from your ${booking.turfName} Ball Machine session.`,
+            { screen: "wallet" }
+          );
+        }
+
+        credited++;
+        console.log(`🪙 BM coins credited: bookingId=${bookingId} pcoin=${pcoinPending} vcoin=${vcoinPending} - server.js:4771`);
+      } catch (e) {
+        console.warn(`BM coin credit failed for booking ${docSnap.id}: - server.js:4773`, e.message);
+      }
+    }));
+
+    return res.json({
+      success: true,
+      message: `Ball Machine coin credit run complete. Credited: ${credited}, Skipped (future sessions): ${skipped}`,
+      credited, skipped,
+    });
+  } catch (err) {
+    console.error("creditcompletedballmachinecoins error: - server.js:4783", err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
   // ✅ HEALTH CHECK
   // =======================================================
   app.get("/", (req, res) => res.send("Bookora server running ✅"));
@@ -3719,7 +4794,7 @@ How to answer:
   // ❌ GLOBAL ERROR HANDLER
   // =======================================================
   app.use((err, req, res, next) => {
-    console.error("Global Error: - server.js:3722", err);
+    console.error("Global Error: - server.js:4797", err);
     res.status(500).json({ success: false, error: "Internal server error" });
   });
 
@@ -3727,4 +4802,4 @@ How to answer:
   // 🚀 START
   // =======================================================
   const PORT = process.env.PORT || 5000;
-  app.listen(PORT, () => console.log(`Server running on ${PORT} ✅ - server.js:3730`));
+  app.listen(PORT, () => console.log(`Server running on ${PORT} ✅ - server.js:4805`));
