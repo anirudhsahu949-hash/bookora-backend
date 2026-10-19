@@ -747,6 +747,29 @@ const offerLimiter = rateLimit({
         });
       }
 
+            // ── Quick-slots-only turfs: booking must sit exactly on the slot grid ──
+      if (turf.flexibleSlotsEnabled === false) {
+        const dur      = Number(turf.slotDuration || 60);              // minutes
+        const openMin  = Number(turf.openingTime || 0) * 60;
+        const toMin    = (t) => parseTimePart(t);                      // existing helper
+        const ranges   = slots.map((sl) => {
+          const [a, b] = String(sl).split(" - ");
+          const start  = toMin(a);
+          let   end    = toMin(b);
+          if (end <= start) end = 24 * 60;                             // "12:00 AM" end
+          return { start, end };
+        });
+        const startMin = Math.min(...ranges.map((r) => r.start));
+        const endMin   = Math.max(...ranges.map((r) => r.end));
+        const onGrid   = (startMin - openMin) % dur === 0 && (endMin - startMin) % dur === 0;
+        if (!onGrid) {
+          return res.status(400).json({
+            success: false,
+            error: `This turf only takes fixed ${dur}-minute slots. Please update the app and pick a Quick Slot.`,
+          });
+        }
+      }
+
       const specialSnap = await db.collection("specialPrices")
         .where("turfId", "==", turfId).where("date", "==", dateString).get();
       const specialPrices = specialSnap.docs.map((d) => d.data());
@@ -887,7 +910,7 @@ const offerLimiter = rateLimit({
 
       return res.json({ orderId: order.id, amount: order.amount, currency: order.currency, key: process.env.KEY_ID });
     } catch (err) {
-      console.error("createorder error: - server.js:890", err);
+      console.error("createorder error: - server.js:913", err);
       return res.status(500).json({ error: err.message });
     }
   });
@@ -1057,12 +1080,12 @@ const offerLimiter = rateLimit({
             const u = userDoc.data();
             userName = u.name || ""; userPhone = u.phone || ""; userEmail = u.email || "";
           }
-        } catch (e) { console.warn("Could not fetch user: - server.js:1060", e.message); }
+        } catch (e) { console.warn("Could not fetch user: - server.js:1083", e.message); }
 
         if (userName && bookingId) {
           db.collection("bookings").doc(bookingId)
             .update({ userName, userPhone, userEmail })
-            .catch((e) => console.warn("Name update failed: - server.js:1065", e.message));
+            .catch((e) => console.warn("Name update failed: - server.js:1088", e.message));
         }
       }
 
@@ -1077,7 +1100,7 @@ const offerLimiter = rateLimit({
             .filter((d) => orderData.slots.includes(d.data().slotTime))
             .map((d) => d.ref.delete())
         );
-      } catch (e) { console.warn("Lock cleanup failed: - server.js:1080", e.message); }
+      } catch (e) { console.warn("Lock cleanup failed: - server.js:1103", e.message); }
 
       if (orderData.promoId && bookingId) {
         try {
@@ -1090,7 +1113,7 @@ const offerLimiter = rateLimit({
           await db.collection("promoCodes").doc(orderData.promoId).update({
             usedCount: admin.firestore.FieldValue.increment(1),
           });
-        } catch (e) { console.warn("Promo usage recording failed: - server.js:1093", e.message); }
+        } catch (e) { console.warn("Promo usage recording failed: - server.js:1116", e.message); }
       }
 
       // =======================================================
@@ -1134,7 +1157,7 @@ const offerLimiter = rateLimit({
           coinUpdate.coinStatus = "pending"; // pending → credited after slot ends
 
         await db.collection("bookings").doc(bookingId).update(coinUpdate)
-    .catch((e) => console.warn("Coin booking update failed: - server.js:1137", e.message));
+    .catch((e) => console.warn("Coin booking update failed: - server.js:1160", e.message));
 
           // ── PCoin: increment pendingBalance in wallet ────────────────────
           if (pcoinPending > 0) {
@@ -1211,10 +1234,10 @@ const offerLimiter = rateLimit({
             });
           }
 
-          console.log(`🪙 Coins pending: pcoin=${pcoinPending} vcoin=${vcoinPending} bookingId=${bookingId} - server.js:1214`);
+          console.log(`🪙 Coins pending: pcoin=${pcoinPending} vcoin=${vcoinPending} bookingId=${bookingId} - server.js:1237`);
         } catch (coinErr) {
           // Coin errors must NEVER block booking confirmation
-          console.warn("Coin pending earn failed (nonfatal): - server.js:1217", coinErr.message);
+          console.warn("Coin pending earn failed (nonfatal): - server.js:1240", coinErr.message);
         }
       }
       // =======================================================
@@ -1306,13 +1329,13 @@ const offerLimiter = rateLimit({
             pcoinsRedeemed: pcoinsActuallyRedeemed,
             vcoinsRedeemed: vcoinsActuallyRedeemed,
           }).catch(() => {});
-          console.log(`🪙 Coins redeemed: pcoin=${pcoinsActuallyRedeemed} vcoin=${vcoinsActuallyRedeemed} bookingId=${bookingId} - server.js:1309`);
+          console.log(`🪙 Coins redeemed: pcoin=${pcoinsActuallyRedeemed} vcoin=${vcoinsActuallyRedeemed} bookingId=${bookingId} - server.js:1332`);
         }
         if (pcoinsActuallyRedeemed < pcoinsRequested || vcoinsActuallyRedeemed < vcoinsRequested) {
-          console.warn(`🪙 Coin redeem shortfall: requested pcoin=${pcoinsRequested}/vcoin=${vcoinsRequested}, actually redeemed pcoin=${pcoinsActuallyRedeemed}/vcoin=${vcoinsActuallyRedeemed}, bookingId=${bookingId} - server.js:1312`);
+          console.warn(`🪙 Coin redeem shortfall: requested pcoin=${pcoinsRequested}/vcoin=${vcoinsRequested}, actually redeemed pcoin=${pcoinsActuallyRedeemed}/vcoin=${vcoinsActuallyRedeemed}, bookingId=${bookingId} - server.js:1335`);
         }
       } catch (redeemErr) {
-        console.warn("Coin redeem failed (nonfatal): - server.js:1315", redeemErr.message);
+        console.warn("Coin redeem failed (nonfatal): - server.js:1338", redeemErr.message);
       }
       // =======================================================
       // END COIN REDEEM
@@ -1335,7 +1358,7 @@ const offerLimiter = rateLimit({
       return res.json({ success: true, bookingId, pcoinPending, vcoinPending });
 
     } catch (err) {
-      console.error("verifypayment error: - server.js:1338", err);
+      console.error("verifypayment error: - server.js:1361", err);
 
       if (err.message?.startsWith("SLOT_CONFLICT") && payment_id_outer) {
         try {
@@ -1344,7 +1367,7 @@ const offerLimiter = rateLimit({
             const refund = await razorpay.payments.refund(payment_id_outer, {
               amount: payment.amount, notes: { reason: err.message }, speed: "normal",
             });
-            console.log("Autorefund initiated: - server.js:1347", refund.id);
+            console.log("Autorefund initiated: - server.js:1370", refund.id);
             if (order_id) {
               await db.collection("orders").doc(order_id).update({
                 orderStatus: "refunded", paymentStatus: "refunded",
@@ -1359,7 +1382,7 @@ const offerLimiter = rateLimit({
             });
           }
         } catch (refundErr) {
-          console.error("Autorefund failed: - server.js:1362", refundErr.message);
+          console.error("Autorefund failed: - server.js:1385", refundErr.message);
           return res.status(409).json({
             success: false, error: err.message.replace("SLOT_CONFLICT: ", ""),
             autoRefunded: false,
@@ -1378,7 +1401,7 @@ const offerLimiter = rateLimit({
             });
           }
         }
-      } catch (e) { console.warn("Failed order update: - server.js:1381", e.message); }
+      } catch (e) { console.warn("Failed order update: - server.js:1404", e.message); }
 
       return res.status(500).json({ success: false, error: err.message || "Verification failed" });
     }
@@ -1466,7 +1489,7 @@ const offerLimiter = rateLimit({
         await Promise.all(
           lockSnap.docs.filter((ld) => slots.includes(ld.data().slotTime)).map((ld) => ld.ref.delete())
         );
-      } catch (e) { console.warn("Lock cleanup on cancel failed: - server.js:1469", e.message); }
+      } catch (e) { console.warn("Lock cleanup on cancel failed: - server.js:1492", e.message); }
 
       let refundId   = null;
       let refundNote = "no_refund";
@@ -1484,7 +1507,7 @@ const offerLimiter = rateLimit({
             refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
           });
         } catch (refundError) {
-          console.error("Razorpay refund error: - server.js:1487", refundError.message);
+          console.error("Razorpay refund error: - server.js:1510", refundError.message);
           await bookingRef.update({
             refundStatus: "failed", refundError: refundError.message,
             refundFailedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -1629,11 +1652,11 @@ const offerLimiter = rateLimit({
             vcoinsRedeemed: 0,   // NEW
             coinStatus:   "cancelled",
           }).catch(() => {});
-          console.log(`🪙 Coins reversed: pcoin=${pcoinPending} vcoin=${vcoinPending} pcoinRefunded=${pcoinsRedeemed} vcoinRefunded=${vcoinsRedeemed} bookingId=${bookingId} - server.js:1632`);
+          console.log(`🪙 Coins reversed: pcoin=${pcoinPending} vcoin=${vcoinPending} pcoinRefunded=${pcoinsRedeemed} vcoinRefunded=${vcoinsRedeemed} bookingId=${bookingId} - server.js:1655`);
         }
       } catch (coinErr) {
         // Coin reversal errors must NEVER block cancellation response
-        console.warn("Coin reversal failed (nonfatal): - server.js:1636", coinErr.message);
+        console.warn("Coin reversal failed (nonfatal): - server.js:1659", coinErr.message);
       }
       // =======================================================
       // END COIN REVERSAL
@@ -1659,7 +1682,7 @@ const offerLimiter = rateLimit({
           : "Booking cancelled successfully.",
       });
     } catch (err) {
-      console.error("cancelbooking error: - server.js:1662", err);
+      console.error("cancelbooking error: - server.js:1685", err);
       return res.status(500).json({ success: false, error: err.message || "Cancellation failed. Please try again." });
     }
   });
@@ -1709,7 +1732,7 @@ const offerLimiter = rateLimit({
             refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
           });
         } catch (refundErr) {
-          console.error("Admin refund failed: - server.js:1712", refundErr.message);
+          console.error("Admin refund failed: - server.js:1735", refundErr.message);
           await bookingRef.update({ refundStatus: "failed", refundError: refundErr.message });
           refundNote = "refund_failed";
         }
@@ -1831,7 +1854,7 @@ const offerLimiter = rateLimit({
           }).catch(() => {});
         }
       } catch (coinErr) {
-        console.warn("Admin cancel coin reversal failed (nonfatal): - server.js:1834", coinErr.message);
+        console.warn("Admin cancel coin reversal failed (nonfatal): - server.js:1857", coinErr.message);
       }
       // =======================================================
       // END COIN REVERSAL
@@ -1855,7 +1878,7 @@ const offerLimiter = rateLimit({
         message: wasOnline && refundAmount > 0 ? `Booking cancelled. ₹${refundAmount} refund initiated.` : "Booking cancelled successfully.",
       });
     } catch (err) {
-      console.error("admincancelbooking error: - server.js:1858", err);
+      console.error("admincancelbooking error: - server.js:1881", err);
       return res.status(500).json({ success: false, error: err.message });
     }
   });
@@ -1924,7 +1947,7 @@ const offerLimiter = rateLimit({
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
       } catch (refundErr) {
-        console.error("Owner cancel refund failed: - server.js:1927", refundErr.message);
+        console.error("Owner cancel refund failed: - server.js:1950", refundErr.message);
         await bookingRef.update({ refundStatus: "failed", refundError: refundErr.message });
         refundNote = "refund_failed";
       }
@@ -2043,7 +2066,7 @@ const offerLimiter = rateLimit({
         }).catch(() => {});
       }
     } catch (coinErr) {
-      console.warn("Owner cancel coin reversal failed (nonfatal): - server.js:2046", coinErr.message);
+      console.warn("Owner cancel coin reversal failed (nonfatal): - server.js:2069", coinErr.message);
     }
  
     // ── Notify the user ──
@@ -2061,7 +2084,7 @@ const offerLimiter = rateLimit({
         : "Booking cancelled successfully.",
     });
   } catch (err) {
-    console.error("ownercancelbooking error: - server.js:2064", err);
+    console.error("ownercancelbooking error: - server.js:2087", err);
     return res.status(500).json({ success: false, error: err.message || "Cancellation failed." });
   }
 });
@@ -2214,7 +2237,7 @@ app.post("/owner-reschedule-booking", adminActionLimiter, requireAdminOrOwner, a
       message: "Booking rescheduled successfully. The customer has been notified.",
     });
   } catch (err) {
-    console.error("ownerreschedulebooking error: - server.js:2217", err);
+    console.error("ownerreschedulebooking error: - server.js:2240", err);
     if (err.message?.startsWith("SLOT_CONFLICT")) {
       return res.status(409).json({
         success: false,
@@ -2275,7 +2298,7 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
  
     return res.json({ success: true, key });
   } catch (err) {
-    console.error("marksettlementpaid error: - server.js:2278", err);
+    console.error("marksettlementpaid error: - server.js:2301", err);
     return res.status(500).json({ success: false, error: err.message || "Could not mark settlement as paid." });
   }
 });
@@ -2310,7 +2333,7 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
         refundAmount: booking.refundAmount || 0,
       });
     } catch (err) {
-      console.error("refundstatus error: - server.js:2313", err);
+      console.error("refundstatus error: - server.js:2336", err);
       return res.status(500).json({ success: false, error: err.message });
     }
   });
@@ -2424,7 +2447,7 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
 
       res.json({ success: true, uid: userRecord.uid });
     } catch (e) {
-      console.error("createleagueowner error: - server.js:2427", e);
+      console.error("createleagueowner error: - server.js:2450", e);
       res.status(400).json({ success: false, error: e.message });
     }
   });
@@ -2459,7 +2482,7 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
 
       res.json({ success: true, turfsDeactivated: turfSnap.size, operatorsUnlinked: operatorSnap.size });
     } catch (e) {
-      console.error("deleteowner error: - server.js:2462", e);
+      console.error("deleteowner error: - server.js:2485", e);
       res.status(400).json({ success: false, error: e.message });
     }
   });
@@ -2509,10 +2532,10 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
       // 5) Delete the Firebase Auth account (this signs them out everywhere)
       await admin.auth().deleteUser(uid);
   
-      console.log(`🗑️ Account selfdeleted: ${uid} - server.js:2512`);
+      console.log(`🗑️ Account selfdeleted: ${uid} - server.js:2535`);
       return res.json({ success: true });
     } catch (err) {
-      console.error("deletemyaccount error: - server.js:2515", err);
+      console.error("deletemyaccount error: - server.js:2538", err);
       return res.status(500).json({ success: false, error: err.message || "Could not delete account." });
     }
   });
@@ -2585,7 +2608,7 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
 
       return res.json({ success: true });
     } catch (err) {
-      console.error("callLead error: - server.js:2588", err);
+      console.error("callLead error: - server.js:2611", err);
       return res.status(500).json({ success: false, error: err.message });
     }
   });
@@ -2661,7 +2684,7 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
 
       return res.json({ orderId: order.id, amount: order.amount, currency: order.currency, key: process.env.KEY_ID });
     } catch (err) {
-      console.error("creategymorder error: - server.js:2664", err);
+      console.error("creategymorder error: - server.js:2687", err);
       return res.status(500).json({ error: err.message });
     }
   });
@@ -2737,7 +2760,7 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
           await db.collection("promoCodes").doc(orderData.promoId).update({
             usedCount: admin.firestore.FieldValue.increment(1),
           });
-        } catch (e) { console.warn("gym promo usage failed: - server.js:2740", e.message); }
+        } catch (e) { console.warn("gym promo usage failed: - server.js:2763", e.message); }
       }
 
       sendPushToUser(orderData.userId, "🎉 Membership Active!",
@@ -2753,7 +2776,7 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
 
       return res.json({ success: true, membershipId });
     } catch (err) {
-      console.error("verifygympayment error: - server.js:2756", err);
+      console.error("verifygympayment error: - server.js:2779", err);
       return res.status(500).json({ success: false, error: err.message || "Verification failed" });
     }
   });
@@ -2802,7 +2825,7 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
 
       res.json({ success: true, leagueId: ref.id });
     } catch (e) {
-      console.error("createleague error: - server.js:2805", e);
+      console.error("createleague error: - server.js:2828", e);
       res.status(400).json({ success: false, error: e.message });
     }
   });
@@ -2885,7 +2908,7 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
         linkedCount: playerUids.length,
       });
     } catch (err) {
-      console.error("addteam error: - server.js:2888", err);
+      console.error("addteam error: - server.js:2911", err);
       return res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -2930,7 +2953,7 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
 
       res.json({ success: true, matchId: ref.id });
     } catch (e) {
-      console.error("addmatch error: - server.js:2933", e);
+      console.error("addmatch error: - server.js:2956", e);
       res.status(400).json({ success: false, error: e.message });
     }
   });
@@ -2993,7 +3016,7 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
  
       return res.json({ success: true, matchId: ref.id });
     } catch (e) {
-      console.error("createquickmatch error: - server.js:2996", e);
+      console.error("createquickmatch error: - server.js:3019", e);
       return res.status(400).json({ success: false, error: e.message });
     }
   });
@@ -3063,9 +3086,9 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
                     "stats.losses":  (Number(s.losses)  || 0) + (result === "loss" ? 1 : 0),
                     "stats.draws":   (Number(s.draws)   || 0) + (result === "draw" ? 1 : 0),
                   });
-                  console.log(`Stats updated: uid=${player.uid} result=${result} - server.js:3066`);
+                  console.log(`Stats updated: uid=${player.uid} result=${result} - server.js:3089`);
                 } catch (e) {
-                  console.error(`Stats update failed for uid=${player.uid}: - server.js:3068`, e.message);
+                  console.error(`Stats update failed for uid=${player.uid}: - server.js:3091`, e.message);
                 }
               })
           );
@@ -3076,12 +3099,12 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
           updateTeamPlayers(teamBSnap, resultB),
         ]);
 
-        console.log(`Match ${matchId} completed. Stats engine done. A:${sA} B:${sB} - server.js:3079`);
+        console.log(`Match ${matchId} completed. Stats engine done. A:${sA} B:${sB} - server.js:3102`);
       }
 
       res.json({ success: true });
     } catch (e) {
-      console.error("updatematchscore error: - server.js:3084", e);
+      console.error("updatematchscore error: - server.js:3107", e);
       res.status(400).json({ success: false, error: e.message });
     }
   });
@@ -3175,7 +3198,7 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
         key:      process.env.KEY_ID,
       });
     } catch (err) {
-      console.error("createplayerprofileorder error: - server.js:3178", err);
+      console.error("createplayerprofileorder error: - server.js:3201", err);
       return res.status(500).json({ success: false, error: err.message || "Could not create order." });
     }
   });
@@ -3269,9 +3292,9 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
             notes:  { reason: "Playon ID was taken by another user during checkout." },
             speed:  "normal",
           });
-          console.log(`Autorefund issued for profile order ${order_id}  ID taken - server.js:3272`);
+          console.log(`Autorefund issued for profile order ${order_id}  ID taken - server.js:3295`);
         } catch (refundErr) {
-          console.error("Profile order refund failed: - server.js:3274", refundErr.message);
+          console.error("Profile order refund failed: - server.js:3297", refundErr.message);
         }
         await db.collection("pendingProfileOrders").doc(order_id).delete().catch(() => {});
         return res.status(409).json({
@@ -3317,7 +3340,7 @@ app.post("/mark-settlement-paid", adminActionLimiter, requireAdminOrOwner, async
 
       return res.json({ success: true, isRenewal: false, expiresAt: newExpiresAt.toISOString() });
     } catch (err) {
-      console.error("verifyplayerprofilepayment error: - server.js:3320", err);
+      console.error("verifyplayerprofilepayment error: - server.js:3343", err);
       return res.status(500).json({ success: false, error: err.message || "Verification failed." });
     }
   });
@@ -3431,7 +3454,7 @@ How to answer:
         const profSnap = await db.collection("playerProfiles").doc(uid).get();
         if (profSnap.exists) profile = profSnap.data();
       } catch (e) {
-        console.warn("coach profile lookup failed (nonfatal): - server.js:3434", e.message);
+        console.warn("coach profile lookup failed (nonfatal): - server.js:3457", e.message);
       }
 
       const historySnap = await db.collection("coachConversations").doc(uid)
@@ -3463,7 +3486,7 @@ How to answer:
 
       return res.json({ success: true, reply: replyText });
     } catch (err) {
-      console.error("coachchat error: - server.js:3466", err.message);
+      console.error("coachchat error: - server.js:3489", err.message);
       return res.status(500).json({ success: false, error: "The coach is unavailable right now. Please try again in a moment." });
     }
   });
@@ -3479,7 +3502,7 @@ How to answer:
       const messages = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       return res.json({ success: true, messages });
     } catch (err) {
-      console.error("coachhistory error: - server.js:3482", err.message);
+      console.error("coachhistory error: - server.js:3505", err.message);
       return res.status(500).json({ success: false, error: "Could not load conversation history." });
     }
   });
@@ -3496,7 +3519,7 @@ How to answer:
       await batch.commit();
       return res.json({ success: true });
     } catch (err) {
-      console.error("coachclear error: - server.js:3499", err.message);
+      console.error("coachclear error: - server.js:3522", err.message);
       return res.status(500).json({ success: false, error: "Could not clear the conversation." });
     }
   });
@@ -3533,7 +3556,7 @@ How to answer:
 
       return res.json({ success: true, sent, total: tomorrowBookings.length });
     } catch (e) {
-      console.error("sendreminders error: - server.js:3536", e);
+      console.error("sendreminders error: - server.js:3559", e);
       return res.status(500).json({ success: false, error: e.message });
     }
   });
@@ -3575,7 +3598,7 @@ How to answer:
 
       return res.json({ success: true, total, message: "Notifications sent" });
     } catch (e) {
-      console.error("sendadminnotification error: - server.js:3578", e);
+      console.error("sendadminnotification error: - server.js:3601", e);
       return res.status(500).json({ success: false, error: e.message });
     }
   });
@@ -3628,7 +3651,7 @@ How to answer:
         message: `PCoin rate set to ${rate} coins per ₹1000. Enabled: ${enabled !== false}`,
       });
     } catch (err) {
-      console.error("pcoinconfig error: - server.js:3631", err);
+      console.error("pcoinconfig error: - server.js:3654", err);
       return res.status(500).json({ success: false, error: err.message });
     }
   });
@@ -3703,7 +3726,7 @@ How to answer:
         message: `Referral reward set to ${coins} PCoins. Enabled: ${enabled !== false}`,
       });
     } catch (err) {
-      console.error("referralconfig error: - server.js:3706", err);
+      console.error("referralconfig error: - server.js:3729", err);
       return res.status(500).json({ success: false, error: err.message });
     }
   });
@@ -3794,7 +3817,7 @@ How to answer:
  
       return res.json({ success: true, message: "Referral code applied! Reward unlocks after your first booking." });
     } catch (err) {
-      console.error("applyreferralcode error: - server.js:3797", err);
+      console.error("applyreferralcode error: - server.js:3820", err);
       return res.status(500).json({ success: false, error: err.message });
     }
   });
@@ -3844,7 +3867,7 @@ How to answer:
         message: `VCoin ${vcoinEnabled ? "enabled" : "disabled"} at ${rate} coins/booking for turf ${turfId}`,
       });
     } catch (err) {
-      console.error("vcoinconfig error: - server.js:3847", err);
+      console.error("vcoinconfig error: - server.js:3870", err);
       return res.status(500).json({ success: false, error: err.message });
     }
   });
@@ -4069,18 +4092,18 @@ How to answer:
                   { screen: "wallet" }
                 );
  
-                console.log(`🤝 Referral reward: ${rewardCoins} PCoins → ${referrerUid} (friend=${uid}, booking=${bookingId}) - server.js:4072`);
+                console.log(`🤝 Referral reward: ${rewardCoins} PCoins → ${referrerUid} (friend=${uid}, booking=${bookingId}) - server.js:4095`);
               }
             }
           } catch (refErr) {
             // Referral errors must NEVER block coin crediting
-            console.warn(`Referral reward failed (nonfatal) for booking ${bookingId}: - server.js:4077`, refErr.message);
+            console.warn(`Referral reward failed (nonfatal) for booking ${bookingId}: - server.js:4100`, refErr.message);
           }
 
           credited++;
-          console.log(`🪙 Coins credited: bookingId=${bookingId} pcoin=${pcoinPending} vcoin=${vcoinPending} - server.js:4081`);
+          console.log(`🪙 Coins credited: bookingId=${bookingId} pcoin=${pcoinPending} vcoin=${vcoinPending} - server.js:4104`);
         } catch (e) {
-          console.warn(`Coin credit failed for booking ${docSnap.id}: - server.js:4083`, e.message);
+          console.warn(`Coin credit failed for booking ${docSnap.id}: - server.js:4106`, e.message);
         }
       }));
 
@@ -4090,7 +4113,7 @@ How to answer:
         credited, skipped,
       });
     } catch (err) {
-      console.error("creditcompletedcoins error: - server.js:4093", err);
+      console.error("creditcompletedcoins error: - server.js:4116", err);
       return res.status(500).json({ success: false, error: err.message });
     }
   });
@@ -4241,7 +4264,7 @@ app.get("/ballmachine-availability", async (req, res) => {
 
     return res.json({ success: true, package: pkg, durationMinutes, machineCount, available });
   } catch (err) {
-    console.error("ballmachineavailability error: - server.js:4244", err);
+    console.error("ballmachineavailability error: - server.js:4267", err);
     return res.status(500).json({ success: false, error: err.message || "Failed to load availability" });
   }
 });
@@ -4311,7 +4334,7 @@ app.post("/create-ballmachine-order", orderLimiter, async (req, res) => {
 
     return res.json({ orderId: order.id, amount: order.amount, currency: order.currency, key: process.env.KEY_ID });
   } catch (err) {
-    console.error("createballmachineorder error: - server.js:4314", err);
+    console.error("createballmachineorder error: - server.js:4337", err);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -4444,7 +4467,7 @@ app.post("/verify-ballmachine-payment", verifyLimiter, async (req, res) => {
           const u = userDoc.data();
           userName = u.name || ""; userPhone = u.phone || ""; userEmail = u.email || "";
         }
-      } catch (e) { console.warn("Could not fetch user: - server.js:4447", e.message); }
+      } catch (e) { console.warn("Could not fetch user: - server.js:4470", e.message); }
       if (userName && bookingId) {
         db.collection("ballMachineBookings").doc(bookingId)
           .update({ userName, userPhone, userEmail }).catch(() => {});
@@ -4463,7 +4486,7 @@ app.post("/verify-ballmachine-payment", verifyLimiter, async (req, res) => {
           .filter((d) => d.data().startUnit === orderData.startUnit)
           .map((d) => d.ref.delete())
       );
-    } catch (e) { console.warn("BM lock cleanup failed: - server.js:4466", e.message); }
+    } catch (e) { console.warn("BM lock cleanup failed: - server.js:4489", e.message); }
 
     // =========================================================================
     // 🪙 COIN EARN — PENDING (credited after session ends, via cron)
@@ -4497,7 +4520,7 @@ app.post("/verify-ballmachine-payment", verifyLimiter, async (req, res) => {
         if (pcoinPending > 0) coinUpdate.pcoinPending = pcoinPending;
         if (vcoinPending > 0) coinUpdate.vcoinPending = vcoinPending;
         await db.collection("ballMachineBookings").doc(bookingId).update(coinUpdate)
-          .catch((e) => console.warn("BM coin booking update failed: - server.js:4500", e.message));
+          .catch((e) => console.warn("BM coin booking update failed: - server.js:4523", e.message));
 
         if (pcoinPending > 0) {
           const pcWalletRef = db.collection("pcoinWallets").doc(orderData.userId);
@@ -4552,9 +4575,9 @@ app.post("/verify-ballmachine-payment", verifyLimiter, async (req, res) => {
           });
         }
 
-        console.log(`🪙 BM coins pending: pcoin=${pcoinPending} vcoin=${vcoinPending} bookingId=${bookingId} - server.js:4555`);
+        console.log(`🪙 BM coins pending: pcoin=${pcoinPending} vcoin=${vcoinPending} bookingId=${bookingId} - server.js:4578`);
       } catch (coinErr) {
-        console.warn("BM coin pending earn failed (nonfatal): - server.js:4557", coinErr.message);
+        console.warn("BM coin pending earn failed (nonfatal): - server.js:4580", coinErr.message);
       }
     }
     // ── END COIN EARN ─────────────────────────────────────────────────────
@@ -4575,7 +4598,7 @@ app.post("/verify-ballmachine-payment", verifyLimiter, async (req, res) => {
     return res.json({ success: true, bookingId, machineIndex, pcoinPending, vcoinPending });
 
   } catch (err) {
-    console.error("verifyballmachinepayment error: - server.js:4578", err);
+    console.error("verifyballmachinepayment error: - server.js:4601", err);
 
     if (err.message?.startsWith("SLOT_CONFLICT") && payment_id_outer) {
       try {
@@ -4598,7 +4621,7 @@ app.post("/verify-ballmachine-payment", verifyLimiter, async (req, res) => {
           });
         }
       } catch (refundErr) {
-        console.error("BM autorefund failed: - server.js:4601", refundErr.message);
+        console.error("BM autorefund failed: - server.js:4624", refundErr.message);
         return res.status(409).json({
           success: false, error: err.message.replace("SLOT_CONFLICT: ", ""),
           autoRefunded: false,
@@ -4617,7 +4640,7 @@ app.post("/verify-ballmachine-payment", verifyLimiter, async (req, res) => {
           });
         }
       }
-    } catch (e) { console.warn("BM failed order update: - server.js:4620", e.message); }
+    } catch (e) { console.warn("BM failed order update: - server.js:4643", e.message); }
 
     return res.status(500).json({ success: false, error: err.message || "Verification failed" });
   }
@@ -4693,7 +4716,7 @@ app.post("/cancel-ballmachine-booking", cancelLimiter, async (req, res) => {
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
       } catch (refundError) {
-        console.error("BM refund error: - server.js:4696", refundError.message);
+        console.error("BM refund error: - server.js:4719", refundError.message);
         await bookingRef.update({ refundStatus: "failed", refundError: refundError.message });
         refundNote = "refund_failed";
       }
@@ -4747,7 +4770,7 @@ app.post("/cancel-ballmachine-booking", cancelLimiter, async (req, res) => {
         await bookingRef.update({ pcoinPending: 0, vcoinPending: 0, coinStatus: "cancelled" }).catch(() => {});
       }
     } catch (coinErr) {
-      console.warn("BM coin reversal failed (nonfatal): - server.js:4750", coinErr.message);
+      console.warn("BM coin reversal failed (nonfatal): - server.js:4773", coinErr.message);
     }
 
     sendPushToUser(userId, "❌ Ball Machine Booking Cancelled",
@@ -4770,7 +4793,7 @@ app.post("/cancel-ballmachine-booking", cancelLimiter, async (req, res) => {
         : "Booking cancelled successfully.",
     });
   } catch (err) {
-    console.error("cancelballmachinebooking error: - server.js:4773", err);
+    console.error("cancelballmachinebooking error: - server.js:4796", err);
     return res.status(500).json({ success: false, error: err.message || "Cancellation failed. Please try again." });
   }
 });
@@ -4829,7 +4852,7 @@ app.post("/owner-cancel-ballmachine-booking", adminActionLimiter, requireAdminOr
           refundInitiated: admin.firestore.FieldValue.serverTimestamp(),
         });
       } catch (refundErr) {
-        console.error("Owner BM cancel refund failed: - server.js:4832", refundErr.message);
+        console.error("Owner BM cancel refund failed: - server.js:4855", refundErr.message);
         await bookingRef.update({ refundStatus: "failed", refundError: refundErr.message });
         refundNote = "refund_failed";
       }
@@ -4882,7 +4905,7 @@ app.post("/owner-cancel-ballmachine-booking", adminActionLimiter, requireAdminOr
         await bookingRef.update({ pcoinPending: 0, vcoinPending: 0, coinStatus: "cancelled" }).catch(() => {});
       }
     } catch (coinErr) {
-      console.warn("Owner BM cancel coin reversal failed (nonfatal): - server.js:4885", coinErr.message);
+      console.warn("Owner BM cancel coin reversal failed (nonfatal): - server.js:4908", coinErr.message);
     }
 
     sendPushToUser(booking.userId, "❌ Ball Machine Booking Cancelled by Venue",
@@ -4899,7 +4922,7 @@ app.post("/owner-cancel-ballmachine-booking", adminActionLimiter, requireAdminOr
         : "Booking cancelled successfully.",
     });
   } catch (err) {
-    console.error("ownercancelballmachinebooking error: - server.js:4902", err);
+    console.error("ownercancelballmachinebooking error: - server.js:4925", err);
     return res.status(500).json({ success: false, error: err.message || "Cancellation failed." });
   }
 });
@@ -5026,7 +5049,7 @@ app.post("/owner-reschedule-ballmachine-booking", adminActionLimiter, requireAdm
       message: "Booking rescheduled successfully. The customer has been notified.",
     });
   } catch (err) {
-    console.error("ownerrescheduleballmachinebooking error: - server.js:5029", err);
+    console.error("ownerrescheduleballmachinebooking error: - server.js:5052", err);
     if (err.message?.startsWith("SLOT_CONFLICT")) {
       return res.status(409).json({
         success: false, slotConflict: true,
@@ -5152,9 +5175,9 @@ app.post("/credit-completed-ballmachine-coins", async (req, res) => {
         }
 
         credited++;
-        console.log(`🪙 BM coins credited: bookingId=${bookingId} pcoin=${pcoinPending} vcoin=${vcoinPending} - server.js:5155`);
+        console.log(`🪙 BM coins credited: bookingId=${bookingId} pcoin=${pcoinPending} vcoin=${vcoinPending} - server.js:5178`);
       } catch (e) {
-        console.warn(`BM coin credit failed for booking ${docSnap.id}: - server.js:5157`, e.message);
+        console.warn(`BM coin credit failed for booking ${docSnap.id}: - server.js:5180`, e.message);
       }
     }));
 
@@ -5164,7 +5187,7 @@ app.post("/credit-completed-ballmachine-coins", async (req, res) => {
       credited, skipped,
     });
   } catch (err) {
-    console.error("creditcompletedballmachinecoins error: - server.js:5167", err);
+    console.error("creditcompletedballmachinecoins error: - server.js:5190", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -5178,7 +5201,7 @@ app.post("/credit-completed-ballmachine-coins", async (req, res) => {
   // ❌ GLOBAL ERROR HANDLER
   // =======================================================
   app.use((err, req, res, next) => {
-    console.error("Global Error: - server.js:5181", err);
+    console.error("Global Error: - server.js:5204", err);
     res.status(500).json({ success: false, error: "Internal server error" });
   });
 
@@ -5186,4 +5209,4 @@ app.post("/credit-completed-ballmachine-coins", async (req, res) => {
   // 🚀 START
   // =======================================================
   const PORT = process.env.PORT || 5000;
-  app.listen(PORT, () => console.log(`Server running on ${PORT} ✅ - server.js:5189`));
+  app.listen(PORT, () => console.log(`Server running on ${PORT} ✅ - server.js:5212`));
