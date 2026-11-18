@@ -5829,8 +5829,549 @@ app.post("/turf-request/notify-result", turfRequestLimiter, async (req, res) => 
   }
 });
 
+
+// =============================================================================
+// 🏏 APL — PLAYER REGISTRATION (order → verify → refund)
+// -----------------------------------------------------------------------------
+// WHERE TO PASTE: at the END of server.js, right BEFORE the global error
+// handler  →  app.use((err, req, res, next) => { ... })
+//
+// Uses what your file already has: db, razorpay, admin, crypto, errMsg(),
+// sendPushToUser(), orderLimiter, verifyLimiter, adminActionLimiter,
+// refundStatusLimiter, requireAuth, requireAdminOrOwner.
+//
+// -----------------------------------------------------------------------------
+// FIRESTORE DOC YOU CREATE BY HAND (once), in the Firebase console:
+//
+//   appConfig / apl-2026
+//   {
+//     leagueId:        "apl-2026",
+//     leagueName:      "Amravati Premier League",
+//     season:          "Season 1",
+//     ownerId:         "<your own uid>",     // later: the league owner's uid
+//     fee:             500,                  // what the player registration costs
+//     gatewayCharge:   15,                   // added on top, so ₹500 reaches you
+//     commission:      0,                    // PlayOn's cut — 0 for APL
+//     registrationOpen:true,
+//     lastDate:        "2026-12-10",         // YYYY-MM-DD, last day to register
+//     auctionDate:     "",                   // fill when decided
+//     leagueDates:     "18, 19 & 20 December 2026",
+//     venue:           "LV Turf, Chitra",
+//     nextRegNo:       1                     // counter — do not edit by hand later
+//   }
+//
+// TESTING: set fee to 1, register from your own phone, then refund it from the
+// admin screen. Once the whole loop works, set fee back to 500.
+// =============================================================================
+
+const APL_PENDING = "pendingAplOrders";
+const APL_REGS    = "aplRegistrations";
+
+// Only these values are ever accepted from the app
+const APL_ROLES    = ["Batsman", "Bowler", "All-rounder", "Wicketkeeper"];
+const APL_BATTING  = ["Right hand", "Left hand"];
+const APL_BOWLING  = ["Fast", "Medium pace", "Spin", "I do not bowl"];
+const APL_SIZES    = ["S", "M", "L", "XL", "XXL"];
+
+// Player code — deliberately random, so nobody can tell how many have registered.
+// 0/O and 1/I are left out: they get misread when someone shares the pass.
+const APL_CODE_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+
+function aplRandomCode(len = 5) {
+  let out = "";
+  for (let i = 0; i < len; i++) {
+    out += APL_CODE_CHARS[Math.floor(Math.random() * APL_CODE_CHARS.length)];
+  }
+  return out;
+}
+
+async function aplUniqueRegNo(leagueId, prefix) {
+  for (let i = 0; i < 6; i++) {
+    const code = `${prefix}-${aplRandomCode()}`;
+    const taken = await db.collection(APL_REGS)
+      .where("leagueId", "==", leagueId)
+      .where("regNo", "==", code)
+      .limit(1).get();
+    if (taken.empty) return code;
+  }
+  // 6 tries all clashed (practically impossible) — make it longer rather than fail
+  return `${prefix}-${aplRandomCode(7)}`;
+}
+
+function aplClean(v, max) {
+  return String(v == null ? "" : v).trim().slice(0, max);
+}
+
+function aplDigits(v) {
+  return String(v == null ? "" : v).replace(/\D/g, "");
+}
+
+// "2026-12-10" → true if that day is already over (IST)
+function aplDatePassed(yyyymmdd) {
+  if (!yyyymmdd) return false;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(yyyymmdd).trim());
+  if (!m) return false;
+  // end of that day in IST = 18:29:59 UTC
+  const endOfDayUtc = Date.UTC(+m[1], +m[2] - 1, +m[3], 18, 29, 59);
+  return Date.now() > endOfDayUtc;
+}
+
+async function aplLoadConfig(leagueId) {
+  const snap = await db.collection("appConfig").doc(leagueId).get();
+  if (!snap.exists) return null;
+  const c = snap.data() || {};
+  return {
+    leagueId,
+    leagueName:       c.leagueName || "League",
+    season:           c.season || "",
+    ownerId:          c.ownerId || null,
+    fee:              Number(c.fee || 0),
+    gatewayCharge:    Number(c.gatewayCharge || 0),
+    commission:       Number(c.commission || 0),
+    registrationOpen: c.registrationOpen !== false,
+    lastDate:         c.lastDate || "",
+    auctionDate:      c.auctionDate || "",
+    leagueDates:      c.leagueDates || "",
+    venue:            c.venue || "",
+  };
+}
+
+// =============================================================================
+// 1️⃣  CREATE ORDER  — player fills the form, taps Pay
+// =============================================================================
+app.post("/create-apl-order", orderLimiter, requireAuth, async (req, res) => {
+  try {
+    const uid      = req.callerUid;
+    const leagueId = aplClean(req.body.leagueId, 60) || "apl-2026";
+
+    const cfg = await aplLoadConfig(leagueId);
+    if (!cfg) {
+      return res.status(404).json({ success: false, error: "This league is not set up yet." });
+    }
+    if (!cfg.registrationOpen) {
+      return res.status(400).json({ success: false, error: "Registration for this league is closed." });
+    }
+    if (aplDatePassed(cfg.lastDate)) {
+      return res.status(400).json({ success: false, error: "The last date for registration has passed." });
+    }
+    if (cfg.fee <= 0) {
+      return res.status(400).json({ success: false, error: "Registration fee is not set. Contact support." });
+    }
+
+    // ── the form ───────────────────────────────────────────────────────────
+    const name      = aplClean(req.body.name, 60);
+    const mobile    = aplDigits(req.body.mobile).slice(-10);
+    const age       = Number(req.body.age || 0);
+    const area      = aplClean(req.body.area, 60);
+    const role      = aplClean(req.body.role, 20);
+    const batting   = aplClean(req.body.battingHand, 20);
+    const bowling   = aplClean(req.body.bowlingStyle, 20);
+    const size      = aplClean(req.body.jerseySize, 4);
+    const jName     = aplClean(req.body.jerseyName, 14).toUpperCase();
+    const jNo       = aplClean(req.body.jerseyNo, 3);
+    const photoUrl  = aplClean(req.body.photoUrl, 400);
+    const experience= aplClean(req.body.experience, 120);
+    const instagram = aplClean(req.body.instagram, 40);
+    const emergency = aplDigits(req.body.emergencyContact).slice(-10);
+
+    if (name.length < 2)                 return res.status(400).json({ success: false, error: "Enter your full name." });
+    if (mobile.length !== 10)            return res.status(400).json({ success: false, error: "Enter a valid 10-digit mobile number." });
+    if (!age || age < 10 || age > 70)    return res.status(400).json({ success: false, error: "Enter a valid age." });
+    if (!area)                           return res.status(400).json({ success: false, error: "Enter your area." });
+    if (!APL_ROLES.includes(role))       return res.status(400).json({ success: false, error: "Choose your playing role." });
+    if (!APL_BATTING.includes(batting))  return res.status(400).json({ success: false, error: "Choose your batting hand." });
+    if (!APL_BOWLING.includes(bowling))  return res.status(400).json({ success: false, error: "Choose your bowling style." });
+    if (!APL_SIZES.includes(size))       return res.status(400).json({ success: false, error: "Choose your jersey size." });
+    if (!/^https?:\/\//i.test(photoUrl)) return res.status(400).json({ success: false, error: "Upload your photo first." });
+
+    // ── already registered? ────────────────────────────────────────────────
+    // One registration per account per league: the doc id makes it impossible
+    // to have two.
+    const regId   = `${leagueId}_${uid}`;
+    const already = await db.collection(APL_REGS).doc(regId).get();
+    if (already.exists && already.data().paymentStatus === "paid") {
+      return res.status(400).json({
+        success: false,
+        alreadyRegistered: true,
+        registrationId: regId,
+        error: "You are already registered for this league.",
+      });
+    }
+
+    // Same mobile from a second account — blocked too
+    const dupe = await db.collection(APL_REGS)
+      .where("leagueId", "==", leagueId)
+      .where("mobile", "==", mobile)
+      .limit(2).get();
+    const dupePaid = dupe.docs.find((d) => d.id !== regId && d.data().paymentStatus === "paid");
+    if (dupePaid) {
+      return res.status(400).json({
+        success: false,
+        error: "This mobile number is already registered for this league.",
+      });
+    }
+
+    // ── money: player pays fee + gateway charge, you receive the fee ───────
+    const total = cfg.fee + cfg.gatewayCharge;
+
+    const order = await razorpay.orders.create({
+      amount:   Math.round(total * 100),
+      currency: "INR",
+      receipt:  `apl_${Date.now()}`,
+      notes:    { uid, leagueId, type: "apl_registration", mobile },
+    });
+
+    await db.collection(APL_PENDING).doc(order.id).set({
+      uid, leagueId,
+      name, mobile, age, area,
+      role, battingHand: batting, bowlingStyle: bowling,
+      jerseySize: size, jerseyName: jName, jerseyNo: jNo,
+      photoUrl, experience, instagram, emergencyContact: emergency,
+      fee:           cfg.fee,
+      gatewayCharge: cfg.gatewayCharge,
+      commission:    cfg.commission,
+      amount:        total,
+      leagueName:    cfg.leagueName,
+      expiresAt:     new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      createdAt:     admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({
+      orderId:  order.id,
+      amount:   order.amount,
+      currency: order.currency,
+      key:      process.env.KEY_ID,
+      fee:      cfg.fee,
+      gatewayCharge: cfg.gatewayCharge,
+    });
+  } catch (err) {
+    console.error("createaplorder error: - server.js:6048", errMsg(err));
+    return res.status(500).json({ success: false, error: errMsg(err) || "Could not start the payment." });
+  }
+});
+
+// =============================================================================
+// 2️⃣  VERIFY PAYMENT  — money received, write the registration
+// =============================================================================
+app.post("/verify-apl-payment", verifyLimiter, async (req, res) => {
+  try {
+    const { order_id, payment_id, signature } = req.body;
+    if (!order_id || !payment_id || !signature) {
+      return res.status(400).json({ success: false, error: "Missing payment fields." });
+    }
+
+    // Signature
+    const expected = crypto
+      .createHmac("sha256", process.env.KEY_SECRET)
+      .update(`${order_id}|${payment_id}`)
+      .digest("hex");
+    if (expected !== signature) {
+      return res.status(400).json({ success: false, error: "Invalid payment signature." });
+    }
+
+    // Really captured at Razorpay?
+    const payment = await razorpay.payments.fetch(payment_id);
+    if (payment.status !== "captured") {
+      return res.status(400).json({ success: false, error: "Payment not captured." });
+    }
+
+    const pendingRef  = db.collection(APL_PENDING).doc(order_id);
+    const pendingSnap = await pendingRef.get();
+
+    // Already processed (double verify call / retry) → say yes, don't charge twice
+    if (!pendingSnap.exists) {
+      const done = await db.collection(APL_REGS).where("orderId", "==", order_id).limit(1).get();
+      if (!done.empty) {
+        const d = done.docs[0];
+        return res.json({ success: true, alreadyDone: true, registrationId: d.id, regNo: d.data().regNo });
+      }
+      return res.status(404).json({ success: false, error: "Order not found or already used." });
+    }
+
+    const p     = pendingSnap.data();
+    const regId = `${p.leagueId}_${p.uid}`;
+    const regRef = db.collection(APL_REGS).doc(regId);
+
+    // Idempotency
+    const existing = await regRef.get();
+    if (existing.exists && existing.data().paymentStatus === "paid") {
+      await pendingRef.delete().catch(() => {});
+      return res.json({ success: true, alreadyDone: true, registrationId: regId, regNo: existing.data().regNo });
+    }
+
+    // Race guard: someone else paid with the same mobile while this one was paying
+    const dupe = await db.collection(APL_REGS)
+      .where("leagueId", "==", p.leagueId)
+      .where("mobile", "==", p.mobile)
+      .limit(2).get();
+    const dupePaid = dupe.docs.find((d) => d.id !== regId && d.data().paymentStatus === "paid");
+    if (dupePaid) {
+      let autoRefunded = false;
+      try {
+        await razorpay.payments.refund(payment_id, {
+          amount: Math.round(Number(p.fee) * 100),
+          notes:  { reason: "Duplicate registration — same mobile already registered", leagueId: p.leagueId },
+          speed:  "normal",
+        });
+        autoRefunded = true;
+      } catch (e) {
+        console.error("APL duplicate autorefund failed: - server.js:6118", errMsg(e));
+      }
+      await pendingRef.delete().catch(() => {});
+      return res.status(409).json({
+        success: false,
+        autoRefunded,
+        error: autoRefunded
+          ? "This mobile number was already registered. Your ₹" + p.fee + " has been refunded."
+          : "This mobile number is already registered. Contact support for the refund.",
+      });
+    }
+
+    // Registration number — one counter per league, taken inside a transaction
+       // Serial = your private count (admin only). regNo = what the player sees.
+    const cfgRef = db.collection("appConfig").doc(p.leagueId);
+    let serial = 0;
+    let prefix = "APL";
+    try {
+      const out = await db.runTransaction(async (tx) => {
+        const snap = await tx.get(cfgRef);
+        const data = snap.exists ? snap.data() : {};
+        const next = Number(data.nextRegNo || 1);
+        tx.update(cfgRef, { nextRegNo: next + 1 });
+        return { next, prefix: String(data.codePrefix || "APL").toUpperCase().slice(0, 6) };
+      });
+      serial = out.next;
+      prefix = out.prefix;
+    } catch (e) {
+      console.warn("APL counter failed, falling back to count: - server.js:6146", errMsg(e));
+      const c = await db.collection(APL_REGS).where("leagueId", "==", p.leagueId).count().get();
+      serial = (c.data().count || 0) + 1;
+    }
+    const regNo = await aplUniqueRegNo(p.leagueId, prefix);
+
+    await regRef.set({
+      leagueId:   p.leagueId,
+      leagueName: p.leagueName || "",
+      uid:        p.uid,
+      regNo,
+      serial,
+
+      name: p.name, mobile: p.mobile, age: p.age, area: p.area,
+      role: p.role, battingHand: p.battingHand, bowlingStyle: p.bowlingStyle,
+      jerseySize: p.jerseySize, jerseyName: p.jerseyName, jerseyNo: p.jerseyNo,
+      photoUrl: p.photoUrl, experience: p.experience || "",
+      instagram: p.instagram || "", emergencyContact: p.emergencyContact || "",
+
+      // money
+      fee:           Number(p.fee),
+      gatewayCharge: Number(p.gatewayCharge),
+      amountPaid:    Number(p.amount),
+      commission:    Number(p.commission || 0),
+      paymentStatus: "paid",
+      paymentId:     payment_id,
+      orderId:       order_id,
+      paymentMethod: payment.method || "",
+      paidAt:        admin.firestore.FieldValue.serverTimestamp(),
+
+      // auction
+      status:    "pool",          // pool | sold | unsold | refunded | withdrawn
+      teamId:    null,
+      teamName:  null,
+      soldPrice: null,
+
+      // refund
+      refundStatus: "none",       // none | processing | initiated | processed | failed
+      refundId:     null,
+      refundAmount: 0,
+
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    await pendingRef.delete().catch(() => {});
+
+    sendPushToUser(p.uid, "🏏 You are in the auction!",
+      `${regNo} — your ${p.leagueName || "league"} registration is confirmed.`,
+      { screen: "apl" }
+    );
+
+    return res.json({ success: true, registrationId: regId, regNo });
+  } catch (err) {
+    console.error("verifyaplpayment error: - server.js:6199", errMsg(err));
+    return res.status(500).json({ success: false, error: errMsg(err) || "Could not confirm the payment." });
+  }
+});
+
+// =============================================================================
+// 3️⃣  REFUND  — admin only. Sends the registration fee back to the player.
+// -----------------------------------------------------------------------------
+// Three locks, because a double refund cannot be undone:
+//   a) Firestore transaction flips refundStatus → "processing"; a second
+//      click finds it already processing and is turned away.
+//   b) Razorpay is asked whether this payment already has a refund.
+//   c) Only the fee (₹500) goes back — the gateway charge is never returned
+//      by Razorpay, so we never promise it.
+// =============================================================================
+app.post("/refund-apl-registration", adminActionLimiter, requireAdminOrOwner, async (req, res) => {
+  const registrationId = aplClean(req.body.registrationId, 120);
+  const reason         = aplClean(req.body.reason, 120) || "Not picked in the auction";
+  if (!registrationId) {
+    return res.status(400).json({ success: false, error: "registrationId required" });
+  }
+
+  const regRef = db.collection(APL_REGS).doc(registrationId);
+  let reg = null;
+
+  // ── (a) claim the refund so nobody else can start it ─────────────────────
+  try {
+    reg = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(regRef);
+      if (!snap.exists) throw new Error("NOT_FOUND");
+      const d = snap.data();
+      if (d.paymentStatus !== "paid") throw new Error("NOT_PAID");
+      if (["processing", "initiated", "processed"].includes(d.refundStatus)) throw new Error("ALREADY");
+      if (!d.paymentId) throw new Error("NO_PAYMENT_ID");
+      tx.update(regRef, {
+        refundStatus:    "processing",
+        refundStartedAt: admin.firestore.FieldValue.serverTimestamp(),
+        refundBy:        req.callerUid,
+        refundReason:    reason,
+      });
+      return d;
+    });
+  } catch (e) {
+    const code = e.message;
+    if (code === "NOT_FOUND")     return res.status(404).json({ success: false, error: "Registration not found." });
+    if (code === "NOT_PAID")      return res.status(400).json({ success: false, error: "This registration was never paid." });
+    if (code === "ALREADY")       return res.status(409).json({ success: false, error: "A refund for this player is already in progress or done." });
+    if (code === "NO_PAYMENT_ID") return res.status(400).json({ success: false, error: "No payment id on this registration." });
+    console.error("aplrefund claim error: - server.js:6247", errMsg(e));
+    return res.status(500).json({ success: false, error: errMsg(e) });
+  }
+
+  const amount = Math.round(Number(reg.fee || 0) * 100);
+  if (amount <= 0) {
+    await regRef.update({ refundStatus: "failed", refundError: "Fee is zero" }).catch(() => {});
+    return res.status(400).json({ success: false, error: "Nothing to refund — fee is zero." });
+  }
+
+  // ── (b) did Razorpay already refund this payment? ────────────────────────
+  try {
+    const existing = await razorpay.payments.fetchMultipleRefund(reg.paymentId);
+    const items = (existing && existing.items) || [];
+    if (items.length > 0) {
+      const r = items[0];
+      await regRef.update({
+        refundStatus: r.status === "processed" ? "processed" : "initiated",
+        refundId:     r.id,
+        refundAmount: (r.amount || 0) / 100,
+        status:       "refunded",
+        refundedAt:   admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return res.json({
+        success: true, alreadyRefunded: true, refundId: r.id,
+        refundAmount: (r.amount || 0) / 100,
+        message: "This payment was already refunded earlier — nothing was sent twice.",
+      });
+    }
+  } catch (e) {
+    // Not fatal: the Firestore lock above is still holding.
+    console.warn("aplrefund existingrefund check skipped: - server.js:6278", errMsg(e));
+  }
+
+  // ── (c) the actual refund ────────────────────────────────────────────────
+  try {
+    const refund = await razorpay.payments.refund(reg.paymentId, {
+      amount,
+      notes: { registrationId, leagueId: reg.leagueId, regNo: reg.regNo || "", reason },
+      speed: "normal",
+    });
+
+    await regRef.update({
+      refundStatus: refund.status === "processed" ? "processed" : "initiated",
+      refundId:     refund.id,
+      refundAmount: amount / 100,
+      status:       "refunded",
+      refundedAt:   admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    sendPushToUser(reg.uid, "💸 Refund on the way",
+      `₹${amount / 100} is going back to the account you paid from. It usually takes 5–7 working days.`,
+      { screen: "apl" }
+    );
+
+    return res.json({
+      success: true,
+      refundId: refund.id,
+      refundAmount: amount / 100,
+      refundStatus: refund.status,
+      message: `₹${amount / 100} refund started. It reaches the player in 5–7 working days.`,
+    });
+  } catch (err) {
+    const msg = errMsg(err);
+    const lowBalance = /balance/i.test(msg);
+
+    // Unlock so you can retry after adding balance
+    await regRef.update({
+      refundStatus:   "failed",
+      refundError:    msg,
+      refundFailedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }).catch(() => {});
+
+    console.error("aplrefund error: - server.js:6320", msg);
+    return res.status(400).json({
+      success: false,
+      lowBalance,
+      error: lowBalance
+        ? "Razorpay balance is not enough for this refund. Add funds in the Razorpay dashboard and try again — nothing was sent."
+        : msg,
+    });
+  }
+});
+
+// =============================================================================
+// 4️⃣  REFUND STATUS  — the player's tracker and the admin screen read this
+// =============================================================================
+app.get("/apl-refund-status/:registrationId", refundStatusLimiter, async (req, res) => {
+  try {
+    const { registrationId } = req.params;
+    const uid = String(req.query.uid || "").trim();
+    if (!registrationId || !uid) {
+      return res.status(400).json({ success: false, error: "registrationId and uid required" });
+    }
+
+    const snap = await db.collection(APL_REGS).doc(registrationId).get();
+    if (!snap.exists) return res.status(404).json({ success: false, error: "Registration not found" });
+    const reg = snap.data();
+    if (reg.uid !== uid) return res.status(403).json({ success: false, error: "Unauthorised" });
+
+    if (reg.refundId && reg.paymentId) {
+      try {
+        const refund = await razorpay.payments.fetchRefund(reg.paymentId, reg.refundId);
+        // keep Firestore in step with Razorpay
+        if (refund.status && refund.status !== reg.refundStatus) {
+          await snap.ref.update({ refundStatus: refund.status }).catch(() => {});
+        }
+        return res.json({
+          success: true, refundId: refund.id, refundStatus: refund.status,
+          refundAmount: (refund.amount || 0) / 100,
+        });
+      } catch (e) { /* fall through to stored values */ }
+    }
+
+    return res.json({
+      success: true,
+      refundId:     reg.refundId || null,
+      refundStatus: reg.refundStatus || "none",
+      refundAmount: reg.refundAmount || 0,
+    });
+  } catch (err) {
+    console.error("aplrefundstatus error: - server.js:6368", errMsg(err));
+    return res.status(500).json({ success: false, error: errMsg(err) });
+  }
+});
+
   app.use((err, req, res, next) => {
-    console.error("Global Error: - server.js:5833", err);
+    console.error("Global Error: - server.js:6374", err);
     res.status(500).json({ success: false, error: "Internal server error" });
   });
 
@@ -5839,12 +6380,12 @@ app.post("/turf-request/notify-result", turfRequestLimiter, async (req, res) => 
   // =======================================================
   const PORT = process.env.PORT || 5000;
   app.listen(PORT, () => {
-    console.log(`Server running on ${PORT} ✅ - server.js:5842`);
+    console.log(`Server running on ${PORT} ✅ - server.js:6383`);
 
     // 🪙 Coins are credited by the server itself — every 15 min while awake,
     // and ~30s after it wakes up. The outside cron only has to keep it awake.
     if (!process.env.CRON_SECRET) {
-      console.warn("⚠️ CRON_SECRET is not set  coin credit will NOT run. Add it in your server's environment variables. - server.js:5847");
+      console.warn("⚠️ CRON_SECRET is not set  coin credit will NOT run. Add it in your server's environment variables. - server.js:6388");
       return;
     }
     let coinRunBusy = false;
@@ -5858,10 +6399,10 @@ app.post("/turf-request/notify-result", turfRequestLimiter, async (req, res) => 
             headers: { "x-cron-secret": process.env.CRON_SECRET },
           });
           const body = await r.json().catch(() => ({}));
-          console.log(`🪙 ${path} → ${r.status} ${body.message || body.error || ""} - server.js:5861`);
+          console.log(`🪙 ${path} → ${r.status} ${body.message || body.error || ""} - server.js:6402`);
         }
       } catch (e) {
-        console.warn("🪙 Coin credit run failed: - server.js:5864", e.message);
+        console.warn("🪙 Coin credit run failed: - server.js:6405", e.message);
       } finally {
         coinRunBusy = false;
       }
