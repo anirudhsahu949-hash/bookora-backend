@@ -5718,6 +5718,469 @@ app.post("/credit-completed-ballmachine-coins", async (req, res) => {
 });
 
 
+
+const SNOOKER_UNIT_MINUTES = 30;          // the booking grid step
+
+// ── Club shape readers (every one survives a half-filled doc) ───────────────
+function snookerGroups(turf) {
+  const raw = Array.isArray(turf?.tableGroups) ? turf.tableGroups : [];
+  return raw
+    .map((g) => ({
+      id:           String(g?.id || "").trim(),
+      label:        String(g?.label || "").trim() || "Table",
+      count:        Number(g?.count) || 0,
+      pricePerHour: Number(g?.pricePerHour) || 0,
+    }))
+    .filter((g) => g.id && g.count > 0);
+}
+
+function snookerTables(turf) {
+  const raw = Array.isArray(turf?.tables) ? turf.tables : [];
+  const clean = raw
+    .map((t, i) => ({
+      id:      String(t?.id || `t${i + 1}`),
+      groupId: String(t?.groupId || ""),
+      name:    String(t?.name || `Table ${i + 1}`),
+    }))
+    .filter((t) => t.groupId);
+  if (clean.length > 0) return clean;
+
+  // Older doc with groups but no tables[] — rebuild them the same way
+  // add-snooker.tsx does, so the ids match what the app already shows.
+  const out = [];
+  let n = 0;
+  snookerGroups(turf).forEach((g) => {
+    for (let i = 0; i < g.count; i++) {
+      n += 1;
+      out.push({ id: `t${n}`, groupId: g.id, name: `Table ${n}` });
+    }
+  });
+  return out;
+}
+
+// Opening window in minutes on the CLUB's day. closingTime 25 = 1 AM, so the
+// window simply runs past 1440 — the same trick the turf code uses.
+function snookerWindow(turf) {
+  const open  = Number(turf?.openingTime ?? 11);
+  let   close = Number(turf?.closingTime ?? 24);
+  if (!close || close <= open) close = open + 1;
+  return { startMin: Math.round(open * 60), endMin: Math.round(close * 60) };
+}
+
+function snookerDurations(turf) {
+  const raw = Array.isArray(turf?.durationOptions) ? turf.durationOptions : [];
+  const ok  = raw.map(Number).filter((m) => m >= 30 && m <= 480);
+  return ok.length > 0 ? ok : [30, 60, 90, 120];
+}
+
+// 1140 → "7:00 PM" · 1500 → "1:00 AM". Must match the app's format exactly,
+// because the owner screens parse these strings back.
+function snookerFmt(mins) {
+  const m  = ((Math.round(mins) % 1440) + 1440) % 1440;
+  let   h  = Math.floor(m / 60);
+  const mm = m % 60;
+  const suffix = h >= 12 ? "PM" : "AM";
+  if (h > 12) h -= 12;
+  if (h === 0) h = 12;
+  return `${h}:${String(mm).padStart(2, "0")} ${suffix}`;
+}
+
+// ["7:00 PM - 7:30 PM", "7:30 PM - 8:00 PM"] — the shape every screen reads.
+function snookerSlotStrings(startMin, durationMinutes) {
+  const out = [];
+  const end = startMin + durationMinutes;
+  for (let t = startMin; t < end; t += SNOOKER_UNIT_MINUTES) {
+    out.push(`${snookerFmt(t)} - ${snookerFmt(Math.min(t + SNOOKER_UNIT_MINUTES, end))}`);
+  }
+  return out;
+}
+
+// "7:30 PM" → 1170 (minutes since midnight), or null.
+function snookerParseTime(s) {
+  const m = String(s).trim().match(/(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i);
+  if (!m) return null;
+  let h = Number(m[1]);
+  const mi = Number(m[2] || 0);
+  const p  = m[3].toUpperCase();
+  if (p === "PM" && h !== 12) h += 12;
+  if (p === "AM" && h === 12) h = 0;
+  return h * 60 + mi;
+}
+
+// Every minute-range a booking or block covers, on the club's day scale.
+function snookerRangesOf(d, turf) {
+  const { startMin, endMin } = snookerWindow(turf);
+  const late = endMin > 1440;
+
+  // Snooker bookings carry startTime + durationMinutes — use that first.
+  const st   = d.startTime ? snookerParseTime(d.startTime) : null;
+  const mins = Number(d.durationMinutes) || 0;
+  if (st !== null && mins > 0) {
+    let s = st;
+    if (late && s < startMin) s += 1440;
+    return [{ start: s, end: s + mins }];
+  }
+
+  // Otherwise fall back to the half-hour strings (also how blocks are stored).
+  const list = Array.isArray(d.selectedSlots) && d.selectedSlots.length > 0 ? d.selectedSlots
+             : Array.isArray(d.slots)         && d.slots.length > 0         ? d.slots
+             : d.slotTime                                                   ? [d.slotTime]
+             : [];
+
+  const out = [];
+  list.forEach((str) => {
+    const parts = String(str).split(" - ");
+    if (parts.length < 2) return;
+    let a = snookerParseTime(parts[0]);
+    let b = snookerParseTime(parts[1]);
+    if (a === null || b === null) return;
+    if (late && a < startMin) a += 1440;
+    if (late && b <= startMin) b += 1440;
+    if (b <= a) b += 1440;
+    out.push({ start: a, end: b });
+  });
+  return out;
+}
+
+// Reads the club's day. Pass `txn` from inside a transaction so the re-check at
+// verify time is atomic; leave it out for the cheap check at order time.
+async function snookerOccupied(turfId, dateString, turf, txn) {
+  const bookingsQ = db.collection("bookings")
+    .where("turfId", "==", turfId)
+    .where("dateString", "==", dateString);
+  const blocksQ = db.collection("blockedSlots")
+    .where("turfId", "==", turfId)
+    .where("date", "==", dateString);
+
+  const [bookSnap, blockSnap] = txn
+    ? [await txn.get(bookingsQ), await txn.get(blocksQ)]
+    : await Promise.all([bookingsQ.get(), blocksQ.get()]);
+
+  const occupied = [];
+  const push = (d) => {
+    if (d.status === "cancelled") return;
+    if (d.pending === true && !d.tableId) return;        // half-saved owner form
+    const tableId = d.tableId ? String(d.tableId) : "all"; // "all" = whole club
+    snookerRangesOf(d, turf).forEach((r) => occupied.push({ tableId, ...r }));
+  };
+
+  bookSnap.docs.forEach((doc) => push(doc.data()));
+  blockSnap.docs.forEach((doc) => push(doc.data()));
+  return occupied;
+}
+
+// The lowest-numbered free table of this group, so a club fills up in a
+// predictable order. null = nothing free, which must stop the booking.
+function snookerFindFreeTable(occupied, groupTables, start, end) {
+  const hits = (tableId) =>
+    occupied.some(
+      (o) => (o.tableId === "all" || o.tableId === tableId) && start < o.end && o.start < end
+    );
+  return groupTables.find((t) => !hits(t.id)) || null;
+}
+
+// =============================================================================
+// ✅ CREATE SNOOKER ORDER
+// =============================================================================
+app.post("/create-snooker-order", orderLimiter, async (req, res) => {
+  try {
+    const { turfId, dateString, groupId, startMinutes, durationMinutes, userId } = req.body;
+    if (!turfId || !dateString || !groupId || startMinutes === undefined || startMinutes === null) {
+      return res.status(400).json({ error: "turfId, dateString, groupId and startMinutes are required" });
+    }
+
+    const turfDoc = await db.collection("turfs").doc(turfId).get();
+    if (!turfDoc.exists) return res.status(404).json({ error: "Club not found" });
+    const turf = turfDoc.data();
+    if (turf.venueType !== "snooker") {
+      return res.status(400).json({ error: "This venue is not a snooker / pool club" });
+    }
+    if (turf.active === false) {
+      return res.status(400).json({ error: "This club is not taking bookings right now" });
+    }
+
+    const group = snookerGroups(turf).find((g) => g.id === String(groupId));
+    if (!group) return res.status(400).json({ error: "Invalid table type selected" });
+    if (!(group.pricePerHour > 0)) {
+      return res.status(400).json({ error: "This table has no price set. Please contact the club." });
+    }
+
+    // Duration must be one the club actually offers — never trust the client.
+    const duration = Number(durationMinutes);
+    if (!snookerDurations(turf).includes(duration)) {
+      return res.status(400).json({ error: "Invalid duration selected" });
+    }
+
+    const start = Number(startMinutes);
+    if (isNaN(start) || start % SNOOKER_UNIT_MINUTES !== 0) {
+      return res.status(400).json({ error: "Invalid start time" });
+    }
+    const end = start + duration;
+    const { startMin, endMin } = snookerWindow(turf);
+    if (start < startMin || end > endMin) {
+      return res.status(400).json({ error: "Selected time is outside the club's hours" });
+    }
+
+    // Price comes from the club doc, never from the app.
+    const price = Math.round(group.pricePerHour * (duration / 60));
+    if (!(price > 0)) return res.status(400).json({ error: "Could not work out the price" });
+
+    const groupTables = snookerTables(turf).filter((t) => t.groupId === group.id);
+    if (groupTables.length === 0) {
+      return res.status(400).json({ error: "This club has no tables of that type" });
+    }
+
+    const occupied = await snookerOccupied(turfId, dateString, turf, null);
+    if (!snookerFindFreeTable(occupied, groupTables, start, end)) {
+      return res.status(409).json({
+        success: false, slotConflict: true,
+        error: "All those tables are booked for that time. Please pick another slot.",
+      });
+    }
+
+    const order = await razorpay.orders.create({
+      amount: price * 100, currency: "INR", receipt: "snk_" + Date.now(),
+    });
+
+    await db.collection("snookerOrders").doc(order.id).set({
+      turfId,
+      turfName:     turf.name || "",
+      turfLocation: turf.location || "",
+      image:        Array.isArray(turf.images) && turf.images.length > 0 ? turf.images[0] : turf.image || "",
+      ownerId:      turf.ownerId || null,
+      ownerName:    turf.ownerName || "",
+      mapLink:      turf.mapLink || "",
+      userId:       userId || null,
+      dateString,
+      startMinutes: start,
+      durationMinutes: duration,
+      startTime:    snookerFmt(start),
+      endTime:      snookerFmt(end),
+      slots:        snookerSlotStrings(start, duration),
+      tableGroupId:    group.id,
+      tableGroupLabel: group.label,
+      ratePerHour:  group.pricePerHour,
+      price,
+      orderId:      order.id,
+      orderStatus:  "created",
+      paymentStatus: "pending",
+      createdAt:    admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return res.json({
+      orderId:  order.id,
+      amount:   order.amount,
+      currency: order.currency,
+      key:      process.env.KEY_ID,
+    });
+  } catch (err) {
+    console.error("createsnookerorder error: - server.js:5977", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// =============================================================================
+// ✅ VERIFY SNOOKER PAYMENT
+// =============================================================================
+app.post("/verify-snooker-payment", verifyLimiter, async (req, res) => {
+  let order_id = null;
+  let payment_id_outer = null;
+
+  try {
+    const { order_id: incomingOrderId, payment_id, signature } = req.body;
+    order_id         = incomingOrderId;
+    payment_id_outer = payment_id;
+
+    if (!order_id || !payment_id || !signature) {
+      return res.status(400).json({ success: false, error: "Missing fields" });
+    }
+
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.KEY_SECRET)
+      .update(order_id + "|" + payment_id)
+      .digest("hex");
+    if (expectedSignature !== signature) {
+      return res.status(400).json({ success: false, error: "Invalid signature" });
+    }
+
+    const payment = await razorpay.payments.fetch(payment_id);
+    if (payment.status !== "captured") {
+      return res.status(400).json({ success: false, error: "Payment not captured" });
+    }
+
+    const orderRef = db.collection("snookerOrders").doc(order_id);
+    let bookingId   = null;
+    let orderData   = null;
+    let alreadyPaid = false;
+    let table       = null;
+
+    await db.runTransaction(async (txn) => {
+      const orderDoc = await txn.get(orderRef);
+      if (!orderDoc.exists) throw new Error("Order not found");
+      orderData = orderDoc.data();
+      if (orderData.orderStatus === "paid") { alreadyPaid = true; return; }
+
+      const turfDoc = await txn.get(db.collection("turfs").doc(orderData.turfId));
+      const turf    = turfDoc.exists ? turfDoc.data() : {};
+
+      const start = Number(orderData.startMinutes);
+      const end   = start + Number(orderData.durationMinutes);
+
+      // Re-check INSIDE the transaction — someone may have booked the last
+      // table of this group while this player was on the Razorpay screen.
+      const occupied    = await snookerOccupied(orderData.turfId, orderData.dateString, turf, txn);
+      const groupTables = snookerTables(turf).filter((t) => t.groupId === orderData.tableGroupId);
+      const free        = snookerFindFreeTable(occupied, groupTables, start, end);
+      if (!free) throw new Error("SLOT_CONFLICT: No table of that type is free any more");
+      table = free;
+
+      bookingId = `${orderData.turfId}_snk_${Date.now()}`;
+      const bookingRef = db.collection("bookings").doc(bookingId);
+      const parsed     = new Date(orderData.dateString);
+      const bookingDate = admin.firestore.Timestamp.fromDate(isNaN(parsed.getTime()) ? new Date() : parsed);
+
+      txn.set(bookingRef, {
+        // ── the same fields a turf booking has, so every owner screen works ──
+        bookingType:   "full",
+        paymentMode:   "full_payment",
+        turfId:        orderData.turfId,
+        turfName:      orderData.turfName,
+        turfLocation:  orderData.turfLocation,
+        image:         orderData.image,
+        ownerId:       orderData.ownerId,
+        ownerName:     orderData.ownerName,
+        mapLink:       orderData.mapLink || "",
+        userId:        orderData.userId || null,
+        userName:      "",
+        userPhone:     "",
+        userEmail:     "",
+        date:          bookingDate,
+        dateString:    orderData.dateString,
+        selectedSlots: orderData.slots,
+        slotTime:      (orderData.slots && orderData.slots[0]) || "",
+        startTime:     orderData.startTime,
+        endTime:       orderData.endTime,
+        paymentId:     payment_id,
+        orderId:       order_id,
+        totalAmount:     orderData.price,
+        paidAmount:      orderData.price,
+        advanceAmount:   orderData.price,
+        remainingAmount: 0,
+        status:              "confirmed",
+        paymentStatus:       "fully_paid",
+        verificationStatus:  "verified",
+        ownerSettlementStatus: "pending",
+        refundStatus:  "not_applicable",
+        refundAmount:  0,
+        cancelledAt:   null,
+        cancelledBy:   null,
+        cancellationReason: null,
+        promoId: null, promoCode: null, discount: 0,
+        originalAmount: orderData.price,
+        offerId: null, offerTitle: null, offerDiscount: 0,
+
+        // ── the club-only fields ──
+        venueType:       "snooker",
+        tableGroupId:    orderData.tableGroupId,
+        tableGroupLabel: orderData.tableGroupLabel,
+        tableId:         free.id,
+        tableName:       free.name,
+        durationMinutes: Number(orderData.durationMinutes),
+        ratePerHour:     Number(orderData.ratePerHour || 0),
+
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      txn.update(orderRef, {
+        orderStatus:  "paid",
+        paymentId:    payment_id,
+        paymentStatus: "fully_paid",
+        verificationStatus: "verified",
+        tableId:      free.id,
+        tableName:    free.name,
+        paidAt:       admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    if (alreadyPaid) {
+      // Razorpay retried the callback — return the booking that already exists.
+      try {
+        const existing = await db.collection("bookings").where("orderId", "==", order_id).limit(1).get();
+        return res.json({
+          success: true,
+          bookingId: existing.empty ? null : existing.docs[0].id,
+          tableName: existing.empty ? null : existing.docs[0].data().tableName || null,
+        });
+      } catch {
+        return res.json({ success: true, bookingId: null });
+      }
+    }
+
+    // ── Fill in who booked (outside the transaction — never blocks it) ──────
+    if (orderData.userId && bookingId) {
+      try {
+        const userDoc = await db.collection("users").doc(orderData.userId).get();
+        if (userDoc.exists) {
+          const u = userDoc.data();
+          db.collection("bookings").doc(bookingId).update({
+            userName:  u.name  || "",
+            userPhone: u.phone || "",
+            userEmail: u.email || "",
+          }).catch((e) => console.warn("snooker name update failed: - server.js:6129", e.message));
+        }
+      } catch (e) {
+        console.warn("snooker user fetch failed: - server.js:6132", e.message);
+      }
+    }
+
+    return res.json({
+      success: true,
+      bookingId,
+      tableName: table ? table.name : null,
+      tableId:   table ? table.id : null,
+    });
+  } catch (err) {
+    console.error("verifysnookerpayment error: - server.js:6143", err);
+
+    // The last table went while the player was paying. Money was captured, so
+    // refund it straight away rather than leaving them to chase support —
+    // same behaviour as the turf flow, and the app already understands
+    // autoRefunded.
+    if (String(err.message || "").startsWith("SLOT_CONFLICT") && payment_id_outer) {
+      try {
+        const payment = await razorpay.payments.fetch(payment_id_outer);
+        const refund  = await razorpay.payments.refund(payment_id_outer, {
+          amount: payment.amount, notes: { reason: err.message }, speed: "normal",
+        });
+        if (order_id) {
+          await db.collection("snookerOrders").doc(order_id).update({
+            orderStatus: "refunded", paymentStatus: "refunded",
+            refundId: refund.id, refundReason: err.message,
+            refundedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }).catch(() => {});
+        }
+        return res.status(409).json({
+          success: false,
+          error: err.message.replace("SLOT_CONFLICT: ", ""),
+          autoRefunded: true,
+          refundId: refund.id,
+          refundAmount: Math.round(payment.amount / 100),
+          message: "That table was taken a moment before your payment went through. Your payment has been refunded automatically — it will reflect in 5–7 business days.",
+        });
+      } catch (refundErr) {
+        console.error("snooker autorefund failed: - server.js:6171", refundErr);
+        return res.status(409).json({
+          success: false,
+          error: err.message.replace("SLOT_CONFLICT: ", ""),
+          autoRefunded: false,
+          message: "That table is no longer available and the refund could not be started automatically. Please contact support with your payment ID.",
+        });
+      }
+    }
+
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
   // ✅ HEALTH CHECK
   // =======================================================
   app.get("/", (req, res) => res.send("Bookora server running ✅"));
@@ -5777,7 +6240,7 @@ app.post("/turf-request/notify-new", turfRequestLimiter, async (req, res) => {
     await ref.update({ adminNotified: true });
     return res.json({ success: true, notified: admins.size });
   } catch (err) {
-    console.error("turfrequest notifynew error: - server.js:5780", err);
+    console.error("turfrequest notifynew error: - server.js:6243", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -5824,7 +6287,7 @@ app.post("/turf-request/notify-result", turfRequestLimiter, async (req, res) => 
     await ref.update({ resultNotified: r.status });
     return res.json({ success: true });
   } catch (err) {
-    console.error("turfrequest notifyresult error: - server.js:5827", err);
+    console.error("turfrequest notifyresult error: - server.js:6290", err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -6045,7 +6508,7 @@ app.post("/create-apl-order", orderLimiter, requireAuth, async (req, res) => {
       gatewayCharge: cfg.gatewayCharge,
     });
   } catch (err) {
-    console.error("createaplorder error: - server.js:6048", errMsg(err));
+    console.error("createaplorder error: - server.js:6511", errMsg(err));
     return res.status(500).json({ success: false, error: errMsg(err) || "Could not start the payment." });
   }
 });
@@ -6115,7 +6578,7 @@ app.post("/verify-apl-payment", verifyLimiter, async (req, res) => {
         });
         autoRefunded = true;
       } catch (e) {
-        console.error("APL duplicate autorefund failed: - server.js:6118", errMsg(e));
+        console.error("APL duplicate autorefund failed: - server.js:6581", errMsg(e));
       }
       await pendingRef.delete().catch(() => {});
       return res.status(409).json({
@@ -6143,7 +6606,7 @@ app.post("/verify-apl-payment", verifyLimiter, async (req, res) => {
       serial = out.next;
       prefix = out.prefix;
     } catch (e) {
-      console.warn("APL counter failed, falling back to count: - server.js:6146", errMsg(e));
+      console.warn("APL counter failed, falling back to count: - server.js:6609", errMsg(e));
       const c = await db.collection(APL_REGS).where("leagueId", "==", p.leagueId).count().get();
       serial = (c.data().count || 0) + 1;
     }
@@ -6196,7 +6659,7 @@ app.post("/verify-apl-payment", verifyLimiter, async (req, res) => {
 
     return res.json({ success: true, registrationId: regId, regNo });
   } catch (err) {
-    console.error("verifyaplpayment error: - server.js:6199", errMsg(err));
+    console.error("verifyaplpayment error: - server.js:6662", errMsg(err));
     return res.status(500).json({ success: false, error: errMsg(err) || "Could not confirm the payment." });
   }
 });
@@ -6244,7 +6707,7 @@ app.post("/refund-apl-registration", adminActionLimiter, requireAdminOrOwner, as
     if (code === "NOT_PAID")      return res.status(400).json({ success: false, error: "This registration was never paid." });
     if (code === "ALREADY")       return res.status(409).json({ success: false, error: "A refund for this player is already in progress or done." });
     if (code === "NO_PAYMENT_ID") return res.status(400).json({ success: false, error: "No payment id on this registration." });
-    console.error("aplrefund claim error: - server.js:6247", errMsg(e));
+    console.error("aplrefund claim error: - server.js:6710", errMsg(e));
     return res.status(500).json({ success: false, error: errMsg(e) });
   }
 
@@ -6275,7 +6738,7 @@ app.post("/refund-apl-registration", adminActionLimiter, requireAdminOrOwner, as
     }
   } catch (e) {
     // Not fatal: the Firestore lock above is still holding.
-    console.warn("aplrefund existingrefund check skipped: - server.js:6278", errMsg(e));
+    console.warn("aplrefund existingrefund check skipped: - server.js:6741", errMsg(e));
   }
 
   // ── (c) the actual refund ────────────────────────────────────────────────
@@ -6317,7 +6780,7 @@ app.post("/refund-apl-registration", adminActionLimiter, requireAdminOrOwner, as
       refundFailedAt: admin.firestore.FieldValue.serverTimestamp(),
     }).catch(() => {});
 
-    console.error("aplrefund error: - server.js:6320", msg);
+    console.error("aplrefund error: - server.js:6783", msg);
     return res.status(400).json({
       success: false,
       lowBalance,
@@ -6365,13 +6828,13 @@ app.get("/apl-refund-status/:registrationId", refundStatusLimiter, async (req, r
       refundAmount: reg.refundAmount || 0,
     });
   } catch (err) {
-    console.error("aplrefundstatus error: - server.js:6368", errMsg(err));
+    console.error("aplrefundstatus error: - server.js:6831", errMsg(err));
     return res.status(500).json({ success: false, error: errMsg(err) });
   }
 });
 
   app.use((err, req, res, next) => {
-    console.error("Global Error: - server.js:6374", err);
+    console.error("Global Error: - server.js:6837", err);
     res.status(500).json({ success: false, error: "Internal server error" });
   });
 
@@ -6380,12 +6843,12 @@ app.get("/apl-refund-status/:registrationId", refundStatusLimiter, async (req, r
   // =======================================================
   const PORT = process.env.PORT || 5000;
   app.listen(PORT, () => {
-    console.log(`Server running on ${PORT} ✅ - server.js:6383`);
+    console.log(`Server running on ${PORT} ✅ - server.js:6846`);
 
     // 🪙 Coins are credited by the server itself — every 15 min while awake,
     // and ~30s after it wakes up. The outside cron only has to keep it awake.
     if (!process.env.CRON_SECRET) {
-      console.warn("⚠️ CRON_SECRET is not set  coin credit will NOT run. Add it in your server's environment variables. - server.js:6388");
+      console.warn("⚠️ CRON_SECRET is not set  coin credit will NOT run. Add it in your server's environment variables. - server.js:6851");
       return;
     }
     let coinRunBusy = false;
@@ -6399,10 +6862,10 @@ app.get("/apl-refund-status/:registrationId", refundStatusLimiter, async (req, r
             headers: { "x-cron-secret": process.env.CRON_SECRET },
           });
           const body = await r.json().catch(() => ({}));
-          console.log(`🪙 ${path} → ${r.status} ${body.message || body.error || ""} - server.js:6402`);
+          console.log(`🪙 ${path} → ${r.status} ${body.message || body.error || ""} - server.js:6865`);
         }
       } catch (e) {
-        console.warn("🪙 Coin credit run failed: - server.js:6405", e.message);
+        console.warn("🪙 Coin credit run failed: - server.js:6868", e.message);
       } finally {
         coinRunBusy = false;
       }
